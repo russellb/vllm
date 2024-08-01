@@ -457,17 +457,18 @@ if envs.VLLM_USE_PRECOMPILED:
     package_data["vllm"].append("*.so")
 
 setup(
-    name="instructlab-vllm",
+    name="vllm",
     version=get_vllm_version(),
-    author="The InstructLab Team",
+    author="vLLM Team",
     license="Apache 2.0",
     description=("A high-throughput and memory-efficient inference and "
                  "serving engine for LLMs"),
     long_description=read_readme(),
     long_description_content_type="text/markdown",
-    url="https://github.com/opendatahub-io/vllm/tree/instructlab",
+    url="https://github.com/vllm-project/vllm",
     project_urls={
-        "Homepage": "https://github.com/opendatahub-io/vllm/tree/instructlab",
+        "Homepage": "https://github.com/vllm-project/vllm",
+        "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
         "Programming Language :: Python :: 3.8",

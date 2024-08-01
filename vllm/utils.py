@@ -31,8 +31,6 @@ from vllm.logger import enable_trace_function_call, init_logger
 
 logger = init_logger(__name__)
 
-DISTRIBUTION_NAME="instructlab-vllm"
-
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
@@ -174,7 +172,7 @@ def is_hip() -> bool:
 def is_cpu() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
-        return "cpu" in version(DISTRIBUTION_NAME)
+        return "cpu" in version("vllm")
     except PackageNotFoundError:
         return False
 
@@ -183,7 +181,7 @@ def is_cpu() -> bool:
 def is_openvino() -> bool:
     from importlib.metadata import PackageNotFoundError, version
     try:
-        return "openvino" in version(DISTRIBUTION_NAME)
+        return "openvino" in version("vllm")
     except PackageNotFoundError:
         return False
 
@@ -209,7 +207,7 @@ def is_tpu() -> bool:
 @lru_cache(maxsize=None)
 def is_xpu() -> bool:
     from importlib.metadata import version
-    is_xpu_flag = "xpu" in version(DISTRIBUTION_NAME)
+    is_xpu_flag = "xpu" in version("vllm")
     # vllm is not build with xpu
     if not is_xpu_flag:
         return False

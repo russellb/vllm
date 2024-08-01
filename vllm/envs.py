@@ -74,9 +74,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
 
-    # If set, vllm will install Punica kernels
+    # If set or if, vllm will install Punica kernels.
+    # Defaults to true if target is cuda or rocm
     "VLLM_INSTALL_PUNICA_KERNELS":
-    lambda: True,
+    lambda: os.environ.get(
+            "VLLM_INSTALL_PUNICA_KERNELS",
+            os.getenv("VLLM_TARGET_DEVICE", "cuda") in ("cuda", "rocm")
+        ) in (True, "1"),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"

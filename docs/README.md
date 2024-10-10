@@ -1,4 +1,4 @@
-# vLLM documents
+# vLLM documentation
 
 ## Build the docs
 

@@ -5,13 +5,14 @@ import sys
 import threading
 import uuid
 from dataclasses import dataclass
-from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
 from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
 import vllm.envs as envs
+import vllm.utils
+from vllm.executor import zmqueue
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -73,11 +74,12 @@ class ResultHandler(threading.Thread):
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
-        self.result_queue = get_mp_context().Queue()
+        self.result_queue_uuid = vllm.utils.random_uuid()
+        self.result_queue_rcv = zmqueue.Sub(self.result_queue_uuid)
         self.tasks: Dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
 
     def run(self):
-        for result in iter(self.result_queue.get, _TERMINATE):
+        for result in iter(self.result_queue_rcv.get, _TERMINATE):
             future = self.tasks.pop(result.task_id)
             _set_future_result(future, result)
         # Ensure that all waiters will receive an exception
@@ -88,7 +90,7 @@ class ResultHandler(threading.Thread):
                        exception=ChildProcessError("worker died")))
 
     def close(self):
-        self.result_queue.put(_TERMINATE)
+        self.result_queue_rcv.close(sentinel=_TERMINATE)
 
 
 class WorkerMonitor(threading.Thread):
@@ -144,16 +146,17 @@ class ProcessWorkerWrapper:
     def __init__(self, result_handler: ResultHandler,
                  worker_factory: Callable[[], Any]) -> None:
         self.mp = get_mp_context()
-        self._task_queue = self.mp.Queue()
-        self.result_queue = result_handler.result_queue
+        self._task_queue_uuid = vllm.utils.random_uuid()
+        self._task_queue_snd = zmqueue.QueueSender(self._task_queue_uuid)
+        self.result_queue_uuid = result_handler.result_queue_uuid
         self.tasks = result_handler.tasks
         self.process: BaseProcess = self.mp.Process(  # type: ignore[attr-defined]
             target=_run_worker_process,
             name="VllmWorkerProcess",
             kwargs=dict(
                 worker_factory=worker_factory,
-                task_queue=self._task_queue,
-                result_queue=self.result_queue,
+                task_queue_uuid=self._task_queue_uuid,
+                result_queue_uuid=self.result_queue_uuid,
             ),
             daemon=True)
 
@@ -164,7 +167,7 @@ class ProcessWorkerWrapper:
         task_id = uuid.uuid4()
         self.tasks[task_id] = future
         try:
-            self._task_queue.put((task_id, method, args, kwargs))
+            self._task_queue_snd.put((task_id, method, args, kwargs))
         except SystemExit:
             raise
         except BaseException as e:
@@ -183,20 +186,20 @@ class ProcessWorkerWrapper:
 
     def terminate_worker(self):
         try:
-            self._task_queue.put(_TERMINATE)
+            self._task_queue_snd.put(_TERMINATE)
         except ValueError:
             self.process.kill()
-        self._task_queue.close()
+        self._task_queue_snd.close()
 
     def kill_worker(self):
-        self._task_queue.close()
+        self._task_queue_snd.close()
         self.process.kill()
 
 
 def _run_worker_process(
     worker_factory: Callable[[], Any],
-    task_queue: Queue,
-    result_queue: Queue,
+    task_queue_uuid: str,
+    result_queue_uuid: str,
 ) -> None:
     """Worker process event loop"""
 
@@ -210,11 +213,14 @@ def _run_worker_process(
     worker = worker_factory()
     del worker_factory
 
+    result_queue_snd = zmqueue.Pub(result_queue_uuid)
+    task_queue_rcv = zmqueue.QueueReceiver(task_queue_uuid)
+
     # Accept tasks from the engine in task_queue
     # and return task output in result_queue
     logger.info("Worker ready; awaiting tasks")
     try:
-        for items in iter(task_queue.get, _TERMINATE):
+        for items in iter(task_queue_rcv.get, _TERMINATE):
             output = None
             exception = None
             task_id, method, args, kwargs = items
@@ -230,12 +236,15 @@ def _run_worker_process(
                     "Exception in worker %s while processing method %s.",
                     process_name, method)
                 exception = e
-            result_queue.put(
+            result_queue_snd.put(
                 Result(task_id=task_id, value=output, exception=exception))
     except KeyboardInterrupt:
         pass
     except Exception:
         logger.exception("Worker failed")
+
+    result_queue_snd.close()
+    task_queue_rcv.close()
 
     logger.info("Worker exiting")
 

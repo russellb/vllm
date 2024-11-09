@@ -74,8 +74,7 @@ class ResultHandler(threading.Thread):
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
-        self.result_queue_uuid = vllm.utils.random_uuid()
-        self.result_queue_rcv = zmqueue.Sub(self.result_queue_uuid)
+        self.result_queue_rcv = zmqueue.Sub()
         self.tasks: Dict[uuid.UUID, Union[ResultFuture, asyncio.Future]] = {}
 
     def run(self):
@@ -90,7 +89,7 @@ class ResultHandler(threading.Thread):
                        exception=ChildProcessError("worker died")))
 
     def close(self):
-        self.result_queue_rcv.close(sentinel=_TERMINATE)
+        self.result_queue_rcv.close()
 
 
 class WorkerMonitor(threading.Thread):
@@ -146,17 +145,15 @@ class ProcessWorkerWrapper:
     def __init__(self, result_handler: ResultHandler,
                  worker_factory: Callable[[], Any]) -> None:
         self.mp = get_mp_context()
-        self._task_queue_uuid = vllm.utils.random_uuid()
-        self._task_queue_snd = zmqueue.QueueSender(self._task_queue_uuid)
-        self.result_queue_uuid = result_handler.result_queue_uuid
+        self._task_queue_snd = zmqueue.QueueSender()
         self.tasks = result_handler.tasks
         self.process: BaseProcess = self.mp.Process(  # type: ignore[attr-defined]
             target=_run_worker_process,
             name="VllmWorkerProcess",
             kwargs=dict(
                 worker_factory=worker_factory,
-                task_queue_uuid=self._task_queue_uuid,
-                result_queue_uuid=self.result_queue_uuid,
+                task_queue_uuid=self._task_queue_snd.uuid,
+                result_queue_uuid=result_handler.result_queue_rcv.uuid,
             ),
             daemon=True)
 
@@ -213,8 +210,8 @@ def _run_worker_process(
     worker = worker_factory()
     del worker_factory
 
-    result_queue_snd = zmqueue.Pub(result_queue_uuid)
-    task_queue_rcv = zmqueue.QueueReceiver(task_queue_uuid)
+    result_queue_snd = zmqueue.Pub(uuid=result_queue_uuid)
+    task_queue_rcv = zmqueue.QueueReceiver(uuid=task_queue_uuid)
 
     # Accept tasks from the engine in task_queue
     # and return task output in result_queue

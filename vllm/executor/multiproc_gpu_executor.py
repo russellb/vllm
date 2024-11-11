@@ -138,9 +138,11 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             f"please set tensor_parallel_size ({tensor_parallel_size}) "
             f"to less than max local gpu count ({cuda_device_count})")
 
-        assert world_size <= cuda_device_count, (
-            f"please ensure that world_size ({world_size}) "
-            f"is less than than max local gpu count ({cuda_device_count})")
+        if world_size > cuda_device_count:
+            headless_workers = world_size / tensor_parallel_size - 1
+            logger.info("Will use %d local GPUs. Expecting %d headless "
+                        "worker%s to join.", tensor_parallel_size,
+                        headless_workers, "s" if headless_workers > 1 else "")
 
     def shutdown(self):
         if (worker_monitor := getattr(self, "worker_monitor",

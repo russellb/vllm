@@ -15,6 +15,7 @@
 # limitations under the License.
 import copy
 import json
+import time
 from collections import defaultdict
 from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Union
@@ -27,6 +28,9 @@ from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class BaseLogitsProcessor:
@@ -97,7 +101,12 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
     def _get_guide(cls, regex_string: str,
                    tokenizer: PreTrainedTokenizerBase) -> Guide:
         tokenizer = _adapt_tokenizer(tokenizer)
-        return RegexGuide.from_regex(regex_string, tokenizer)
+        start_time = time.time()
+        guide = RegexGuide.from_regex(regex_string, tokenizer)
+        end_time = time.time()
+        elapsed_time_ms = (end_time - start_time) * 1000
+        logger.info(f"from_regex() took {elapsed_time_ms:.2f} milliseconds")
+        return guide
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.

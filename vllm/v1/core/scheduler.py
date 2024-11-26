@@ -52,6 +52,7 @@ class Scheduler:
         # req_id -> Request
         self.requests: Dict[str, Request] = {}
         # Priority queues for requests.
+        self.initializing: List[Request] = []
         self.waiting: Deque[Request] = deque()
         self.running: List[Request] = []
 
@@ -100,6 +101,17 @@ class Scheduler:
         # Encoder-related.
         scheduled_encoder_inputs: Dict[str, List[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
+
+        # iterate over the requests in the self.initializing list.
+        # any request in the list that has initiailizing set to False
+        # is ready to be moved to waiting
+        to_remove = []
+        for request in self.initializing:
+            if not request.initializing:
+                to_remove.append(request)
+                self.waiting.append(request)
+        for request in to_remove:
+            self.initializing.remove(request)
 
         # First, schedule the RUNNING requests.
         # NOTE(woosuk): At most 1 request in the RUNNING queue is allowed to be
@@ -457,7 +469,8 @@ class Scheduler:
         return False
 
     def add_request(self, request: Request) -> None:
-        self.waiting.append(request)
+        (self.initializing
+         if request.initializing else self.waiting).append(request)
         self.requests[request.request_id] = request
 
     def finish_requests(

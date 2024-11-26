@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 import pickle
 import queue
@@ -78,6 +79,9 @@ class EngineCore:
 
         self._last_logging_time = time.time()
 
+        # Create a threadpool executor for running async initialization.
+        self._threadpool_executor = ThreadPoolExecutor(max_workers=multiprocessing.cpu_count())
+
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -99,12 +103,29 @@ class EngineCore:
         """Add request to the scheduler."""
 
         req = Request.from_engine_core_request(request)
-        # FIXME(woosuk): The input mapping (e.g., PIL images to tensors) may
-        # take 10-50 ms, which can cause a spike in the latency. We should
-        # consider moving this to a separate thread.
-        if req.mm_data:
-            req.mm_inputs = self.mm_input_mapper.process_inputs(
-                req.mm_data, req.mm_processor_kwargs)
+
+        # If the request has some expensive initialization that can be done async,
+        # we run that in a separate thread. The request is held in the initializing
+        # queue until the initialization is done.
+        if req.mm_data or req.sampling_params.guided_decoding:
+            req.initializing = True
+            def _async_init(req):
+                # Note: doing this async is only helpful if the expensive parts
+                # of process_inputs() are done with the GIL unlocked.
+                # do any any of the MM input mappers do this?
+                if req.mm_data:
+                    req.mm_inputs = self.mm_input_mapper.process_inputs(
+                        req.mm_data, req.mm_processor_kwargs)
+
+                # Assumes the FSM initialization done by the guided decoding
+                # backend is done with the GIL unlocked.
+                if req.sampling_params.guided_decoding:
+                    pass
+                    # TODO
+
+                req.initializing = False
+            self._threadpool_executor.submit(_async_init, req)
+
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):

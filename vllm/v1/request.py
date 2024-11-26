@@ -57,6 +57,10 @@ class Request:
         # Output of the mm input mapper (e.g., image tensors).
         self.mm_inputs: List[MultiModalKwargs] = []
 
+        # Hold this request in the initializing queue until this is False.
+        # It will be True if some async initialization is occurring.
+        self.initializing = False
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(

@@ -712,6 +712,8 @@ class LLMEngine:
             for scheduler in self.scheduler
         ]
         min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        # FIXME: if the guided decoding processor isn't fully initialized
+        # at this point, can we reflect that in the scheduling state?
         min_cost_scheduler.add_seq_group(seq_group)
 
         return seq_group

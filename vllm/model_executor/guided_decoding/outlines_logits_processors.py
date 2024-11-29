@@ -32,11 +32,15 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+from concurrent.futures import (Future, ThreadPoolExecutor)
+
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide):
-        self._guide: Guide = guide
+    def __init__(self, guide_future: Future):
+        self._guide_future: Future = guide_future
+        self._constructor_time = time.perf_counter()
+        self._guide: Guide = None
         self._fsm_state: DefaultDict[int, int] = defaultdict(int)
 
     def __call__(self, input_ids: List[int],
@@ -44,12 +48,16 @@ class BaseLogitsProcessor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
 
+        if self._guide is None:
+            self._guide = self._guide_future.result()
+
         if len(input_ids) > 0:
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
             self._fsm_state[seq_id] = self._guide.get_next_state(
                 state=self._fsm_state[last_seq_id], token_id=last_token)
         else:
+            # FIXME: this can be removed if we're not doing pickling anymore
             # Note: this is a hack.
             # Lark pickling does not work properly (silent failure),
             # which breaks the RPC (which uses python pickleing).
@@ -95,6 +103,9 @@ class BaseLogitsProcessor:
         return scores
 
 
+global_thread_pool = None  # used for generating logits processor fsm
+
+
 class RegexLogitsProcessor(BaseLogitsProcessor):
 
     @classmethod
@@ -119,8 +130,11 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
+        global global_thread_pool
+        if global_thread_pool is None:
+            global_thread_pool = ThreadPoolExecutor(max_workers=2)
         super().__init__(
-            RegexLogitsProcessor._get_guide(regex_string, tokenizer))
+            global_thread_pool.submit(RegexLogitsProcessor._get_guide, regex_string, tokenizer))
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):

@@ -248,6 +248,9 @@ class MQLLMEngine:
                                exception=ENGINE_DEAD_ERROR(self._errored_with))
             self._send_outputs(rpc_err)
 
+        # FIXME: can we initialize logits processors here and defer this request
+        # until then?
+
         try:
             self.engine.add_request(
                 request_id=request_id,

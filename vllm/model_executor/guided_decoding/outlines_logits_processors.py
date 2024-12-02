@@ -30,19 +30,23 @@ from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 from vllm.logger import init_logger
+from vllm.logits_process import Readyable
 
 logger = init_logger(__name__)
 
 from concurrent.futures import (Future, ThreadPoolExecutor)
 
 
-class BaseLogitsProcessor:
+class BaseLogitsProcessor(Readyable):
 
     def __init__(self, guide_future: Future):
         self._guide_future: Future = guide_future
         self._constructor_time = time.perf_counter()
         self._guide: Guide = None
         self._fsm_state: DefaultDict[int, int] = defaultdict(int)
+
+    def ready(self):
+        return self._guide_future.done()
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:

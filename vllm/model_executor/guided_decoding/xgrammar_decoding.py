@@ -203,7 +203,10 @@ class XGrammarLogitsProcessor(Readyable):
         self._future = thread_pool.submit(self._init_ctx)
 
     def ready(self) -> bool:
-        return self.ctx is not None
+        if self._future is not None:
+            return self._future.done()
+        else:
+            return self.ctx is not None
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config}

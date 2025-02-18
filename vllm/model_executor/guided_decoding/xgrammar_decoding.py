@@ -306,8 +306,7 @@ class XGrammarLogitsProcessor:
             elif self.config.json_object:
                 self.ctx = compiler.compile_builtin_json_grammar()
             elif self.config.regex_str:
-                regex_grammar = xgr.Grammar.from_regex(self.config.regex_str)
-                self.ctx = compiler.compile_grammar(regex_grammar)
+                self.ctx = compiler.compile_regex(self.config.regex_str)
             else:
                 raise ValueError(
                     "Invalid configuration for xgrammar logits processor")

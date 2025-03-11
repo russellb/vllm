@@ -20,7 +20,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.structured_output.utils import validate_structured_output_request
+from vllm.v1.structured_output.utils import (
+    validate_structured_output_request_xgrammar)
 
 
 class Processor:
@@ -120,7 +121,7 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = ["xgrammar"]
+        supported_backends = ["xgrammar", "guidance"]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -137,7 +138,8 @@ class Processor:
         if vllm.platforms.current_platform.is_tpu():
             raise ValueError("Structured output is not supported on TPU.")
 
-        validate_structured_output_request(params)
+        if engine_level_backend == "xgrammar":
+            validate_structured_output_request_xgrammar(params)
 
     def process_inputs(
         self,

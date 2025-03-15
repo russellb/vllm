@@ -40,4 +40,4 @@ def get_local_guidance_guided_decoding_logits_processor(
         return GrammarGuidanceLogitsProcessor(guided_params.grammar, tokenizer,
                                               None)
 
-    return None
+    raise ValueError("Unknown guided decoding mode")

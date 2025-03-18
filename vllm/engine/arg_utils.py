@@ -382,16 +382,13 @@ class EngineArgs:
             default='xgrammar',
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
-            'https://github.com/outlines-dev/outlines, '
-            'https://github.com/mlc-ai/xgrammar, and '
-            'https://github.com/noamgat/lm-format-enforcer.'
-            ' Can be overridden per request via guided_decoding_backend'
-            ' parameter.\n'
-            'Backend-specific options can be supplied in a comma-separated '
-            'list following a colon after the backend name. Valid backends and '
-            'all available options are: [xgrammar:no-fallback, '
-            'xgrammar:disable-any-whitespace, '
-            'outlines:no-fallback, lm-format-enforcer:no-fallback]')
+            'https://github.com/mlc-ai/xgrammar and '
+            'https://github.com/guidance-ai/llguidance.'
+            'Valid backend values are "xgrammar", "guidance", and "auto". '
+            'With "auto", we will make opinionated choices based on request'
+            'contents and what the backend libraries currently support, so '
+            'the behavior is subject to change in each release. '
+            'The default is xgrammar.')
         parser.add_argument(
             '--logits-processor-pattern',
             type=nullable_str,
@@ -1461,8 +1458,8 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # Only support Xgrammar for guided decoding so far.
-        SUPPORTED_GUIDED_DECODING = ["xgrammar", "xgrammar:nofallback"]
+        # Support xgrammar, guidance, or an opinionated automatic mode.
+        SUPPORTED_GUIDED_DECODING = ["xgrammar", "guidance", "auto"]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)

@@ -2788,7 +2788,7 @@ class DecodingConfig:
         v0_valid_guided_backends = [
             'outlines', 'lm-format-enforcer', 'xgrammar'
         ]
-        v1_valid_guided_backends = ['xgrammar', 'guidance']
+        v1_valid_guided_backends = ['xgrammar', 'guidance', 'auto']
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name

@@ -121,7 +121,16 @@ class Processor:
         if not params.guided_decoding or not self.decoding_config:
             return
 
-        supported_backends = ["xgrammar", "guidance"]
+        # Platform validation
+        if vllm.platforms.current_platform.is_tpu():
+            raise ValueError("Structured output is not supported on TPU.")
+
+        # Backend validation
+        #  - ensure backend is supported in v1
+        #  - if a backend was included in the request, ensure it matches
+        #    the backend configured for the engine. We don't support changing
+        #    the backend per request in V1.
+        supported_backends = ["auto", "xgrammar", "guidance"]
         engine_level_backend = self.decoding_config.guided_decoding_backend
         if engine_level_backend not in supported_backends:
             raise ValueError(f"Only {supported_backends} structured output is "
@@ -135,11 +144,24 @@ class Processor:
         else:
             params.guided_decoding.backend = engine_level_backend
 
-        if vllm.platforms.current_platform.is_tpu():
-            raise ValueError("Structured output is not supported on TPU.")
+        # Request content validation
 
         if engine_level_backend == "xgrammar":
+            # xgrammar with no fallback
             validate_structured_output_request_xgrammar(params)
+            params.guided_decoding.backend = "xgrammar"
+        elif engine_level_backend == "auto":
+            # "auto" is an opt-in to opinionated behavior where we try to
+            # choose a backend based on request contents. This is not the
+            # default as it is less predictable and subject to change
+            # between releases as feature support changes.
+            try:
+                validate_structured_output_request_xgrammar(params)
+                params.guided_decoding.backend = "xgrammar"
+            except ValueError:
+                # The request includes some jsonschema feature(s) that
+                # are not supported in xgrammar. Fall back to guidance.
+                params.guided_decoding.backend = "guidance"
 
     def process_inputs(
         self,

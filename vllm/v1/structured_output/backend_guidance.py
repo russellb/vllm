@@ -48,13 +48,15 @@ class GuidanceBackend(StructuredOutputBackend):
 
         if request_type == StructuredOutputOptions.JSON:
             # TODO: make whitespace_flexible configurable
-            self.serialized_grammar = llguidance.LLMatcher.grammar_from_json_schema(
-                grammar_spec, defaults={
-                    "whitespace_flexible": True,
-                })
+            self.serialized_grammar = \
+                llguidance.LLMatcher.grammar_from_json_schema(
+                    grammar_spec, defaults={
+                        "whitespace_flexible": True,
+                    })
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            self.serialized_grammar = llguidance.LLMatcher.grammar_from_json_schema(
-                '{"type": "object"}', defaults={
+            self.serialized_grammar = \
+                llguidance.LLMatcher.grammar_from_json_schema(
+                    '{"type": "object"}', defaults={
                     "whitespace_flexible": True,
                 })
         else:
@@ -65,12 +67,10 @@ class GuidanceBackend(StructuredOutputBackend):
             elif request_type == StructuredOutputOptions.CHOICE:
                 tp = "choice"
             else:
-                logger.error(
-                    "Validation should have already occurred. Please file an issue."
-                )
-                raise ValueError(
-                    f"grammar is not of valid supported types. ({request_type!s})"
-                )
+                logger.error("Validation should have already occurred. "
+                             "Please file an issue.")
+                raise ValueError("grammar is not of valid supported types. "
+                                 f"({request_type!s})")
 
             self.serialized_grammar = llguidance.grammar_from(tp, grammar_spec)
 
@@ -124,8 +124,10 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
         # TODO - Add jump decoding support in the future:
         # self.ll_matcher.compute_ff_bytes() - this should always work
-        # self.ll_matcher.compute_ff_tokens() - this only works for "canonical" tokenizers
-        # for conversion between the two, see https://github.com/guidance-ai/llguidance/blob/main/docs/fast_forward.md
+        # self.ll_matcher.compute_ff_tokens() - this only works for
+        #   "canonical" tokenizers
+        # For conversion between the two, see
+        # https://github.com/guidance-ai/llguidance/blob/main/docs/fast_forward.md
 
         r = self.ll_matcher.consume_tokens(tokens)
 
@@ -134,7 +136,8 @@ class GuidanceGrammar(StructuredOutputGrammar):
         return r
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
-        # this will automatically return [EOS] mask if the matcher is stopped or otherwise in an error state
+        # this will automatically return [EOS] mask if the matcher is stopped
+        # or otherwise in an error state
         llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
         self.check_error()
 

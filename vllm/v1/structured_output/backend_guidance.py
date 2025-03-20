@@ -80,11 +80,14 @@ class GuidanceBackend(StructuredOutputBackend):
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 
-        return GuidanceGrammar(
+        r = GuidanceGrammar(
             ll_matcher=ll_matcher,
             ll_tokenizer=self.ll_tokenizer,
             vocab_size=self.vocab_size,
         )
+
+        r.check_error()
+        return r
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return llguidance_torch.allocate_token_bitmask(
@@ -96,6 +99,15 @@ class GuidanceGrammar(StructuredOutputGrammar):
     ll_matcher: llguidance.LLMatcher
     ll_tokenizer: llguidance.LLTokenizer
     vocab_size: int
+    printed_error: bool = False
+    terminated: bool = False
+
+    def check_error(self):
+        if not self.printed_error:
+            err = self.ll_matcher.get_error()
+            if err:
+                self.printed_error = True
+                logger.warning("LLMatcher error: %s", err)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the parser.
@@ -103,6 +115,9 @@ class GuidanceGrammar(StructuredOutputGrammar):
         Returns True if the parser was advanced successfully.
         Returns False if the parser failed to advance.
         """
+
+        if self.ll_tokenizer.eos_token in tokens:
+            self.terminated = True
 
         if self.ll_matcher.is_stopped():
             return True
@@ -114,14 +129,17 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
         r = self.ll_matcher.consume_tokens(tokens)
 
+        self.check_error()
+
         return r
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         # this will automatically return [EOS] mask if the matcher is stopped or otherwise in an error state
         llguidance_torch.fill_next_token_bitmask(self.ll_matcher, bitmask, idx)
+        self.check_error()
 
     def is_terminated(self) -> bool:
-        return self.ll_matcher.is_stopped()
+        return self.terminated
 
     def reset(self):
         # This method may be not needed anymore? TODO

@@ -172,7 +172,7 @@ def test_guided_json_unsupported_schema(
                          sampling_params=sampling_params,
                          use_tqdm=True)
     else:
-        # This should work for both "guidelines" and "auto".
+        # This should work for both "guidance" and "auto".
 
         outputs = llm.generate(
             prompts=("Give an example JSON object for a grade "

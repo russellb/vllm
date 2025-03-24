@@ -1484,7 +1484,7 @@ class EngineArgs:
 
         # Xgrammar and Guidance are supported.
         SUPPORTED_GUIDED_DECODING = [
-            "xgrammar", "xgrammar:disable-any-whitespace", "guidance"
+            "xgrammar", "xgrammar:disable-any-whitespace", "guidance", "auto"
         ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",

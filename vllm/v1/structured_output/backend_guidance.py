@@ -2,17 +2,19 @@
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.request import get_structured_output_key
 
 if TYPE_CHECKING:
     import llguidance
@@ -45,34 +47,8 @@ class GuidanceBackend(StructuredOutputBackend):
 
     def compile_grammar(self, request_type: StructuredOutputOptions,
                         grammar_spec: str) -> StructuredOutputGrammar:
-
-        if request_type == StructuredOutputOptions.JSON:
-            # TODO: make whitespace_flexible configurable
-            self.serialized_grammar = \
-                llguidance.LLMatcher.grammar_from_json_schema(
-                    grammar_spec, defaults={
-                        "whitespace_flexible": True,
-                    })
-        elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            self.serialized_grammar = \
-                llguidance.LLMatcher.grammar_from_json_schema(
-                    '{"type": "object"}', defaults={
-                    "whitespace_flexible": True,
-                })
-        else:
-            if request_type == StructuredOutputOptions.REGEX:
-                tp = "regex"
-            elif request_type == StructuredOutputOptions.GRAMMAR:
-                tp = "grammar"
-            elif request_type == StructuredOutputOptions.CHOICE:
-                tp = "choice"
-            else:
-                logger.error("Validation should have already occurred. "
-                             "Please file an issue.")
-                raise ValueError("grammar is not of valid supported types. "
-                                 f"({request_type!s})")
-
-            self.serialized_grammar = llguidance.grammar_from(tp, grammar_spec)
+        self.serialized_grammar = serialize_guidance_grammar(
+            request_type, grammar_spec)
 
         ll_matcher = llguidance.LLMatcher(
             self.ll_tokenizer,
@@ -147,3 +123,44 @@ class GuidanceGrammar(StructuredOutputGrammar):
     def reset(self):
         # This method may be not needed anymore? TODO
         self.ll_matcher.reset()
+
+
+def serialize_guidance_grammar(request_type: StructuredOutputOptions,
+                               grammar_spec: str) -> str:
+    if request_type == StructuredOutputOptions.JSON:
+        # TODO: make whitespace_flexible configurable
+        return \
+            llguidance.LLMatcher.grammar_from_json_schema(
+                grammar_spec, defaults={
+                    "whitespace_flexible": True,
+                })
+    elif request_type == StructuredOutputOptions.JSON_OBJECT:
+        return \
+            llguidance.LLMatcher.grammar_from_json_schema(
+                '{"type": "object"}', defaults={
+                "whitespace_flexible": True,
+            })
+    else:
+        if request_type == StructuredOutputOptions.REGEX:
+            tp = "regex"
+        elif request_type == StructuredOutputOptions.GRAMMAR:
+            tp = "grammar"
+        elif request_type == StructuredOutputOptions.CHOICE:
+            tp = "choice"
+        else:
+            logger.error("Validation should have already occurred. "
+                         "Please file an issue.")
+            raise ValueError("grammar is not of valid supported types. "
+                             f"({request_type!s})")
+        return llguidance.grammar_from(tp, grammar_spec)
+
+
+def validate_guidance_grammar(
+        sampling_params: SamplingParams,
+        tokenizer: Optional[llguidance.LLTokenizer] = None) -> None:
+    tp, grm = get_structured_output_key(sampling_params)
+    guidance_grm = serialize_guidance_grammar(tp, grm)
+    err = llguidance.LLMatcher.validate_grammar(guidance_grm,
+                                                tokenizer=tokenizer)
+    if err:
+        raise ValueError(f"Grammar error: {err}")

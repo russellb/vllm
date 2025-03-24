@@ -19,6 +19,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.structured_output.backend_guidance import (
+    validate_guidance_grammar)
 from vllm.v1.structured_output.utils import (
     validate_structured_output_request_xgrammar)
 
@@ -154,6 +156,13 @@ class Processor:
                 # The request includes some jsonschema feature(s) that
                 # are not supported in xgrammar. Fall back to guidance.
                 params.guided_decoding.backend = "guidance"
+
+        if params.guided_decoding.backend == "guidance":
+            # TODO ideally we would have the LLTokenizer here as Lark syntax
+            # allows <|special_token|> and similar, see
+            # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
+            # Without tokenizer these are disallowed in grammars.
+            validate_guidance_grammar(params, tokenizer=None)
 
     def process_inputs(
         self,

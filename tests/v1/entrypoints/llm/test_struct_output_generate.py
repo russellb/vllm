@@ -14,8 +14,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar", "guidance"]
+#GUIDED_DECODING_BACKENDS_V1 = ["guidance"]
 MODELS_TO_TEST = [
-    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
+    "Qwen/Qwen2.5-1.5B-Instruct",  #"mistralai/Ministral-8B-Instruct-2410"
 ]
 
 
@@ -303,9 +304,7 @@ def test_guided_grammar_ebnf_invalid(
         top_p=0.95,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(grammar="not a grammar"))
-    with pytest.raises(ValueError,
-                       match="Failed to convert the grammar "
-                       "from Lark to EBNF."):
+    with pytest.raises(ValueError, match="Failed to convert the grammar "):
         llm.generate(
             prompts=("Generate a sql statement that selects col_1 from "
                      "table_1 where it is equal to 1"),

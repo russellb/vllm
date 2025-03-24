@@ -129,15 +129,13 @@ def serialize_guidance_grammar(request_type: StructuredOutputOptions,
                                grammar_spec: str) -> str:
     if request_type == StructuredOutputOptions.JSON:
         # TODO: make whitespace_flexible configurable
-        return \
-            llguidance.LLMatcher.grammar_from_json_schema(
-                grammar_spec, defaults={
-                    "whitespace_flexible": True,
-                })
+        return llguidance.LLMatcher.grammar_from_json_schema(
+            grammar_spec, defaults={
+                "whitespace_flexible": True,
+            })
     elif request_type == StructuredOutputOptions.JSON_OBJECT:
-        return \
-            llguidance.LLMatcher.grammar_from_json_schema(
-                '{"type": "object"}', defaults={
+        return llguidance.LLMatcher.grammar_from_json_schema(
+            '{"type": "object"}', defaults={
                 "whitespace_flexible": True,
             })
     else:

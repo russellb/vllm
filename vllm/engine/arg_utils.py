@@ -1338,7 +1338,7 @@ class EngineArgs:
             return False
 
         # No Embedding Models so far.
-        if model_config.task not in ["generate"]:
+        if model_config.task not in ["generate", "transcription"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",
                                recommend_to_remove=False)
             return False

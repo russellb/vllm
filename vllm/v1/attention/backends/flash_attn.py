@@ -128,6 +128,46 @@ class FlashAttentionMetadata:
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
 
+    # Begin encoder attn & enc/dec cross-attn fields...
+    # Encoder sequence lengths representation
+    encoder_seq_lens: Optional[list[int]] = None
+    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    encoder_seq_start_loc: Optional[torch.Tensor] = None
+    # Maximum sequence length among encoder sequences
+    max_encoder_seq_len: Optional[int] = None
+    # Number of tokens input to encoder
+    num_encoder_tokens: Optional[int] = None
+
+    # Cross-attention memory-mapping data structures: slot mapping
+    # and block tables
+    cross_slot_mapping: Optional[torch.Tensor] = None
+    cross_block_tables: Optional[torch.Tensor] = None
+
+    @property
+    def is_all_encoder_attn_metadata_set(self):
+        '''
+        All attention metadata required for encoder attention is set.
+        '''
+        return (self.encoder_seq_lens is not None
+                and self.encoder_seq_lens_tensor is not None
+                and self.encoder_seq_start_loc is not None
+                and self.max_encoder_seq_len is not None
+                and self.num_encoder_tokens is not None)
+
+    @property
+    def is_all_cross_attn_metadata_set(self):
+        '''
+        All attention metadata required for enc/dec cross-attention is set.
+
+        Superset of encoder attention required metadata.
+        '''
+        return (self.is_all_encoder_attn_metadata_set
+                and self.cross_slot_mapping is not None
+                and self.cross_block_tables is not None)
+
 
 #
 # Take in `query_start_loc_np` and `seq_lens_np` and break the sequences into
@@ -500,6 +540,85 @@ class FlashAttentionMetadataBuilder:
         return use_cascade_attention(*args, **kwargs)
 
 
+def _get_query_key_seq_metadata(
+    attn_metadata,
+    is_prompt: bool,
+    attn_type: str,
+) -> tuple:
+    """
+    Returns sequence metadata for key and query based on the specified 
+    attention type and whether input is a prompt.
+
+    This function computes the starting locations and maximum sequence lengths 
+    for key and query sequences for different attention types.
+
+    Args:
+        attn_metadata: The attention metadata object
+        is_prompt (bool): A flag indicating if the input is a prompt
+        attn_type (AttentionType): The type of attention being used.
+
+    Returns:
+        tuple: A tuple containing four integers:
+            - Starting location for the query sequence.
+            - Maximum sequence length for the query sequence.
+            - Starting location for the key sequence.
+            - Maximum sequence length for the key sequence.
+
+    Raises:
+        AttributeError: If an invalid attention type is provided.
+    """
+    from vllm.attention.layer import AttentionType
+
+    if attn_type == AttentionType.DECODER:
+        # Decoder self-attention
+        # Choose max_seq_len based on whether we are in prompt_run
+        max_seq_len = attn_metadata.max_seq_len
+        return (attn_metadata.query_start_loc, attn_metadata.max_query_len,
+                attn_metadata.query_start_loc, max_seq_len)
+
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        # This is cross attention between the where the key
+        # is the precomputed encoder attention and query
+        # is the input sequence.
+        return (attn_metadata.query_start_loc, attn_metadata.max_query_len,
+                attn_metadata.encoder_seq_start_loc,
+                attn_metadata.max_encoder_seq_len)
+    elif attn_type == AttentionType.ENCODER:
+        # For encoder attention both the query and the key are same i.e the
+        # encoder sequence.
+        return (attn_metadata.encoder_seq_start_loc,
+                attn_metadata.max_encoder_seq_len,
+                attn_metadata.encoder_seq_start_loc,
+                attn_metadata.max_encoder_seq_len)
+    elif attn_type == AttentionType.ENCODER_ONLY:
+        # Note: max_query_len is used instead of max_encoder_seq_len for
+        # encoder-only
+        return (attn_metadata.query_start_loc, attn_metadata.max_query_len,
+                attn_metadata.query_start_loc, attn_metadata.max_seq_len)
+    else:
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
+
+
+def _get_causal_option(attn_type: str) -> bool:
+    """
+    Determine whether the given attention type is suitable for causal 
+    attention mechanisms.
+
+    Args:
+        attn_type (AttentionType): The type of attention being evaluated
+
+    Returns:
+        bool: Returns `True` if the attention type is suitable for causal 
+        attention (i.e., not encoder, encoder-only, or encoder-decoder), 
+        otherwise returns `False`.
+    """
+    from vllm.attention.layer import AttentionType
+
+    return not (attn_type == AttentionType.ENCODER
+                or attn_type == AttentionType.ENCODER_ONLY
+                or attn_type == AttentionType.ENCODER_DECODER)
+
+
 class FlashAttentionImpl(AttentionImpl):
 
     def __init__(
@@ -548,11 +667,7 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {support_head_sizes}. "
                 "Set VLLM_USE_V1=0 to use another attention backend.")
 
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashAttentionImpl")
+        self.attn_type = attn_type
         self.use_irope = use_irope
         self.vllm_flash_attn_version = get_flash_attn_version()
         if is_quantized_kv_cache(self.kv_cache_dtype) \
@@ -590,6 +705,19 @@ class FlashAttentionImpl(AttentionImpl):
             # Profiling run.
             return output
 
+        # Validate attention metadata based on attention type
+        from vllm.attention.layer import AttentionType
+        attn_type = self.attn_type
+        if (attn_type == AttentionType.ENCODER
+                and (not attn_metadata.is_all_encoder_attn_metadata_set)):
+            raise AttributeError("Encoder attention requires setting "
+                                 "encoder metadata attributes.")
+        elif (attn_type == AttentionType.ENCODER_DECODER
+              and (not attn_metadata.is_all_cross_attn_metadata_set)):
+            raise AttributeError("Encoder/decoder cross-attention "
+                                 "requires setting cross-attention "
+                                 "metadata attributes.")
+
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
         # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
@@ -602,20 +730,36 @@ class FlashAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_sharing_target_layer_name is None:
+        if self.kv_sharing_target_layer_name is None and (
+                attn_type != AttentionType.ENCODER) and (key is not None) and (
+                    value is not None):
+            # We skip updating the KV cache under two conditions:
+            #  a. When the Attention Type is ENCODER. In this phase, we compute
+            #     only the encoder attention without updating the cache.
+            #  b. When both Key and Value are None. This occurs during
+            #     cross-attention computation in the decoding phase, where the
+            #     KV cache is already populated with the cross-attention
+            #     tensor. Thus, we skip cache updates during this time.
+            if attn_type == AttentionType.ENCODER_DECODER:
+                # Update cross-attention KV cache (prefill-only)
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                # Update self-attention KV cache (prefill/decode)
+                updated_slot_mapping = attn_metadata.slot_mapping
+
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
+            # NOTE(woosuk): Here, key and value are padded while
+            # slot_mapping is not padded. However, we don't need to do
+            # key[:num_actual_tokens] and value[:num_actual_tokens] because
+            # the reshape_and_cache_flash op uses the slot_mapping's shape
+            # to determine the number of actual tokens.
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                attn_metadata.slot_mapping,
+                updated_slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
@@ -635,8 +779,14 @@ class FlashAttentionImpl(AttentionImpl):
         use_local_attn = \
             (self.use_irope and attn_metadata.local_attn_metadata is not None)
 
+        # Get appropriate causal flag based on attention type
+        causal = _get_causal_option(attn_type)
+
         if not attn_metadata.use_cascade or use_local_attn:
             if use_local_attn:
+                # Local attention is only supported for decoder self-attention
+                assert attn_type == AttentionType.DECODER, (
+                    "Local attention only supports decoder self-attention")
                 assert attn_metadata.local_attn_metadata is not None
                 local_metadata = attn_metadata.local_attn_metadata
                 cu_seqlens_q = local_metadata.local_query_start_loc
@@ -646,36 +796,97 @@ class FlashAttentionImpl(AttentionImpl):
                 block_table = local_metadata.local_block_table
                 scheduler_metadata = local_metadata.local_scheduler_metadata
             else:
-                cu_seqlens_q = attn_metadata.query_start_loc
-                seqused_k = attn_metadata.seq_lens
-                max_seqlen_q = attn_metadata.max_query_len
-                max_seqlen_k = attn_metadata.max_seq_len
-                block_table = attn_metadata.block_table
+                # Get sequence metadata based on attention type
+                (cu_seqlens_q, max_seqlen_q, cu_seqlens_k, max_seqlen_k) = \
+                    _get_query_key_seq_metadata(attn_metadata, True, attn_type)
+
+                # For cross-attention, use encoder sequence info for K/V
+                if attn_type == AttentionType.ENCODER_DECODER:
+                    seqused_k = attn_metadata.encoder_seq_lens_tensor
+                    block_table = attn_metadata.cross_block_tables
+                elif attn_type == AttentionType.ENCODER:
+                    seqused_k = attn_metadata.encoder_seq_lens_tensor
+                    # For encoder attention, we don't use block tables in
+                    # typical setup
+                    block_table = attn_metadata.block_table
+                else:
+                    # Regular decoder self-attention
+                    seqused_k = attn_metadata.seq_lens
+                    block_table = attn_metadata.block_table
+
                 scheduler_metadata = attn_metadata.scheduler_metadata
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+            descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[-2])
 
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+            # For encoder attention or when we have direct key/value tensors,
+            # we might need to use them directly instead of cache
+            use_direct_kv = (attn_type == AttentionType.ENCODER
+                             or (attn_type == AttentionType.ENCODER_DECODER
+                                 and key is not None and value is not None
+                                 and key_cache.numel() == 0))
+
+            if use_direct_kv and key is not None and value is not None:
+                # Use direct key/value tensors (e.g., during encoder attention)
+                # Apply FP8 quantization if needed
+                if self.kv_cache_dtype.startswith("fp8"):
+                    num_kv_tokens, num_kv_heads, head_size = key.shape
+                    key, _ = ops.scaled_fp8_quant(
+                        key.reshape((num_kv_tokens,
+                                     num_kv_heads * head_size)).contiguous(),
+                        layer._k_scale)
+                    key = key.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+                    value, _ = ops.scaled_fp8_quant(
+                        value.reshape((num_kv_tokens,
+                                       num_kv_heads * head_size)).contiguous(),
+                        layer._v_scale)
+                    value = value.reshape(
+                        (num_kv_tokens, num_kv_heads, head_size))
+
+                # Direct attention computation using varlen function for
+                # non-cached KV
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=causal,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    softcap=self.logits_soft_cap,
+                    out=output[:num_actual_tokens],
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+            else:
+                # Use cached key/value tensors
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
             return output
 
         assert not use_local_attn, (

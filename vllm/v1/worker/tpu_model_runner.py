@@ -497,7 +497,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
 
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_ONLY):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -506,6 +507,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=False,
+                        attn_type=str(attn_module.attn_type),
                     )
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -514,12 +516,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=False,
+                        attn_type=str(attn_module.attn_type),
                     )
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
+            elif attn_module.attn_type == AttentionType.ENCODER:
                 # encoder-only attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                # TODO -- update this once the changes are working
+                #         in gpu_model_runner.py
                 raise NotImplementedError
             else:
                 raise ValueError(

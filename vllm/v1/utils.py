@@ -676,9 +676,28 @@ def bind_kv_cache(
             # One typical case is encoder-decoder model, e.g., bart.
             # The cross attention and self attention in the same decoder layer
             # has different layer_name but the same layer_index.
-            raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+            # For encoder-decoder models, we need to handle multiple layers
+            # with the same index but different attention types.
+            from vllm.attention import AttentionType
+
+            # Find the decoder attention layer (which needs KV cache)
+            decoder_layer_name = None
+            for layer_name in layer_names:
+                if hasattr(forward_context.get(layer_name), 'attn_type'):
+                    attn_type = forward_context[layer_name].attn_type
+                    if attn_type in (AttentionType.DECODER,
+                                     AttentionType.ENCODER_DECODER):
+                        decoder_layer_name = layer_name
+                        break
+
+            if decoder_layer_name is None:
+                # Fallback to first layer if no decoder layer found
+                decoder_layer_name = layer_names[0]
+
+            runner_kv_caches.append(kv_caches[decoder_layer_name])
+        else:
+            layer_name = layer_names[0]
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

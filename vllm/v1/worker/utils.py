@@ -4,8 +4,14 @@ from typing import Optional
 
 import torch
 
+from vllm.attention import AttentionType
+from vllm.attention.layer import Attention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+
+logger = init_logger(__name__)
 
 
 def sanity_check_mm_encoder_outputs(
@@ -110,3 +116,12 @@ def initialize_kv_cache_for_kv_sharing(
         kv_caches[layer_name] = kv_caches[target_layer_name]
         group_idx = layer_to_kv_cache_group_idx[target_layer_name]
         kv_cache_groups[group_idx].layer_names.append(layer_name)
+
+
+def is_encoder_decoder_model(vllm_config: VllmConfig) -> bool:
+    """Check if the model is an encoder-decoder architecture."""
+    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for _, attn_module in layers.items():
+        if attn_module.attn_type == AttentionType.ENCODER_DECODER:
+            return True
+    return False

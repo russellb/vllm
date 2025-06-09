@@ -690,6 +690,10 @@ class FlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
+
+        # log all inputs
+        logger.info(f"FlashAttentionImpl.forward() - query.shape={query.shape}, key.shape={key.shape}, value.shape={value.shape}, kv_cache.shape={kv_cache.shape}, attn_metadata={attn_metadata}")
+
         assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None:

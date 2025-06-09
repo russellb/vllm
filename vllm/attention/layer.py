@@ -22,6 +22,10 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import validate_kv_sharing_target
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 
 class Attention(nn.Module):
@@ -478,3 +482,180 @@ direct_register_custom_op(
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
 )
+
+
+class SimpleAttention(nn.Module):
+    """Simplified attention layer without KV cache.
+    
+    This class provides a clean attention interface for use cases where
+    KV caching is not needed, such as encoder attention in encoder-decoder
+    models. It maintains backend abstraction while removing the complexity
+    of cache management.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.ENCODER,
+        **extra_impl_args,
+    ) -> None:
+        """
+        Simplified attention without KV cache support.
+        
+        Args:
+            num_heads: Number of attention heads
+            head_size: Size of each attention head
+            scale: Scaling factor for attention scores
+            num_kv_heads: Number of key-value heads (for GQA/MQA)
+            alibi_slopes: ALiBi slopes for positional encoding
+            blocksparse_params: Block sparse attention parameters
+            logits_soft_cap: Soft cap for attention logits
+            attn_type: Type of attention (encoder, decoder, etc.)
+        """
+        super().__init__()
+        
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        
+        assert num_heads % num_kv_heads == 0, \
+            f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
+        
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.num_kv_heads = num_kv_heads
+        self.scale = scale
+        self.attn_type = attn_type
+        
+        # Get the appropriate attention backend
+        # We use a dummy dtype and cache settings since we're not using cache
+        dtype = torch.get_default_dtype()
+        attn_backend = get_attn_backend(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype="auto",  # Use auto since we don't have cache
+            block_size=16,  # Dummy value
+            is_attention_free=False,
+            is_blocksparse=blocksparse_params is not None,
+            use_mla=False,
+        )
+        
+        # Initialize the backend implementation
+        impl_cls = attn_backend.get_impl_cls()
+        self.impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=None,  # No sliding window for encoder
+            kv_cache_dtype="auto",  # Use auto since we don't have cache
+            blocksparse_params=blocksparse_params,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=None,
+            **extra_impl_args
+        )
+        
+        self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.dtype = dtype
+        self.use_output = attn_backend.accept_output_buffer
+        
+        # Add quantization attributes needed by FlashAttention backend
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
+        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
+        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        
+        # Initialize quantization scales
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+        self.calculate_kv_scales = True
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Forward pass for simplified attention.
+        
+        Args:
+            query: Query tensor [batch_size * seq_len, num_heads * head_size]
+            key: Key tensor [batch_size * seq_len, num_kv_heads * head_size]  
+            value: Value tensor [batch_size * seq_len, num_kv_heads * head_size]
+            attn_metadata: Optional attention metadata (for compatibility)
+            
+        Returns:
+            Attention output tensor with same shape as query
+        """
+        # Reshape tensors for attention computation
+        # NOTE: We do this outside the impl to minimize CPU overhead
+        batch_size_times_seq_len = query.size(0)
+        query = query.view(batch_size_times_seq_len, self.num_heads, self.head_size)
+        key = key.view(batch_size_times_seq_len, self.num_kv_heads, self.head_size)
+        value = value.view(batch_size_times_seq_len, self.num_kv_heads, self.head_size)
+        
+        hidden_size = self.num_heads * self.head_size
+
+        attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[self.attn_type]
+
+        if self.use_output:
+            # Some backends require an output buffer to be pre-allocated
+            output = torch.zeros_like(query.view(batch_size_times_seq_len, hidden_size))
+            output = output.view(batch_size_times_seq_len, self.num_heads, self.head_size)
+
+            self.impl.forward(
+                self,
+                query,
+                key,
+                value,
+                kv_cache=None,  # No cache
+                attn_metadata=attn_metadata,
+                output=output,
+            )
+            
+            return output.view(batch_size_times_seq_len, hidden_size)
+        else:
+            # Call the backend implementation
+            # For simple attention, we don't need KV cache, so we pass None
+            output = self.impl.forward(
+                self,
+                query,
+                key,
+                value,
+                kv_cache=None,  # No cache
+                attn_metadata=attn_metadata,
+            )
+            
+            # Reshape output back to original format
+            return output.view(batch_size_times_seq_len, hidden_size)
+
+    def calc_kv_scales(self, query, key, value):
+        """Calculate quantization scales for FP8 quantization."""
+        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
+        self._k_scale.copy_(torch.abs(key).max() / self.k_range)
+        self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
+        # We only calculate the scales once
+        self.calculate_kv_scales = False
+
+    def extra_repr(self) -> str:
+        s = f"head_size={self.head_size}"
+        s += f", num_heads={self.num_heads}"
+        s += f", num_kv_heads={self.num_kv_heads}"
+        s += f", scale={self.scale}"
+        s += f", backend={self.impl.__class__.__name__}"
+        s += f", attn_type={self.attn_type}"
+        return s

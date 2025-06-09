@@ -34,6 +34,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.transformers_utils.tokenizer import get_tokenizer, AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -161,6 +162,26 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+
+        # Token logging instrumentation
+        self._tokenizer: Optional[AnyTokenizer] = None
+        self._model_config = vllm_config.model_config
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        """Lazy initialization of tokenizer for token logging."""
+        if self._tokenizer is None:
+            try:
+                self._tokenizer = get_tokenizer(
+                    self._model_config.tokenizer,
+                    tokenizer_mode=self._model_config.tokenizer_mode,
+                    tokenizer_revision=self._model_config.tokenizer_revision,
+                    trust_remote_code=self._model_config.trust_remote_code,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize tokenizer for logging: {e}")
+                self._tokenizer = None
+        return self._tokenizer
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -797,6 +818,16 @@ class Scheduler(SchedulerInterface):
             # to return empty token ids for the request.
             for num_new, output_token_id in enumerate(new_token_ids, 1):
                 request.append_output_token_ids(output_token_id)
+
+                # V1 Token logging instrumentation
+                if self.tokenizer is not None:
+                    try:
+                        decoded_token = self.tokenizer.decode([output_token_id], skip_special_tokens=False)
+                        logger.info(f"[V1_TOKEN_LOG] req_id={req_id} token_id={output_token_id} decoded='{decoded_token}'")
+                    except Exception as e:
+                        logger.warning(f"[V1_TOKEN_LOG] req_id={req_id} token_id={output_token_id} decode_error={e}")
+                else:
+                    logger.info(f"[V1_TOKEN_LOG] req_id={req_id} token_id={output_token_id} decoded='<no_tokenizer>'")
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.

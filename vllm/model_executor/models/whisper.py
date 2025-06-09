@@ -11,7 +11,7 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention import Attention, AttentionType, SimpleAttention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -35,9 +35,10 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
-                         SupportsTranscription, SupportsV0Only)
+                         SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
+from vllm import envs
 
 logger = init_logger(__name__)
 
@@ -170,7 +171,7 @@ class WhisperAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -241,6 +242,9 @@ class WhisperAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
+        #logger.info(
+        #    "[WHISPER DEBUG] WhisperAttention.forward() - "
+        #    "hidden_states.shape=%s", hidden_states.shape)
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -301,6 +305,12 @@ class WhisperCrossAttention(WhisperAttention):
         hidden_states: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
     ):
+        # logger.info(
+        #     "[WHISPER DEBUG] WhisperCrossAttention.forward() - "
+        #     "hidden_states.shape=%s, encoder_hidden_states=%s",
+        #     hidden_states.shape,
+        #     encoder_hidden_states.shape if encoder_hidden_states is not None \
+        #     else None)
         q, _ = self.q_proj(hidden_states)
 
         # Encoder hidden states are only computed once during prefill phase.
@@ -345,6 +355,9 @@ class WhisperMLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor):
+        # logger.info(
+        #     "[WHISPER DEBUG] WhisperMLP.forward() - hidden_states.shape=%s",
+        #     hidden_states.shape)
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
@@ -360,14 +373,22 @@ class WhisperEncoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.embed_dim = config.d_model
-        self.self_attn = WhisperAttention(
-            embed_dim=self.embed_dim,
-            num_heads=config.encoder_attention_heads,
-            attn_type=AttentionType.ENCODER,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
+        if envs.VLLM_USE_V1:
+            self.self_attn = WhisperEncoderAttention(
+                embed_dim=self.embed_dim,
+                num_heads=config.encoder_attention_heads,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
+        else:
+            self.self_attn = WhisperAttention(
+                embed_dim=self.embed_dim,
+                num_heads=config.encoder_attention_heads,
+                attn_type=AttentionType.ENCODER,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mlp = WhisperMLP(
             embed_dim=config.d_model,
@@ -491,6 +512,13 @@ class WhisperEncoder(nn.Module):
                 sinusoids(*self.embed_positions.weight.shape))
 
     def forward(self, input_features: Union[torch.Tensor, list[torch.Tensor]]):
+        logger.info(
+            "[WHISPER DEBUG] WhisperEncoder.forward() - "
+            "input_features type=%s, "
+            "len=%s, first_item_shape=%s", type(input_features),
+            len(input_features) if isinstance(input_features, list) else "N/A",
+            input_features[0].shape
+            if isinstance(input_features, list) else input_features.shape)
         hidden_states = []
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
@@ -504,6 +532,9 @@ class WhisperEncoder(nn.Module):
             hidden_states = encoder_layer(hidden_states)
 
         hidden_states = self.layer_norm(hidden_states)
+        logger.info(
+            "[WHISPER DEBUG] WhisperEncoder.forward() COMPLETED - "
+            "hidden_states.shape=%s -- hidden_states=%s", hidden_states.shape, hidden_states)
         return hidden_states
 
 
@@ -537,6 +568,11 @@ class WhisperDecoder(nn.Module):
         positions: torch.Tensor,
         encoder_hidden_states: Optional[torch.Tensor],
     ):
+        logger.info(
+            "[WHISPER DEBUG] WhisperDecoder.forward() - input_ids.shape=%s, "
+            "positions.shape=%s, encoder_hidden_states=%s", input_ids.shape,
+            positions.shape, encoder_hidden_states.shape
+            if encoder_hidden_states is not None else None)
         inputs_embeds = self.get_input_embeddings(input_ids)
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
@@ -572,6 +608,13 @@ class WhisperModel(nn.Module):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        logger.info(
+            "[WHISPER DEBUG] WhisperModel.forward() - input_features=%s, "
+            "input_ids=%s, positions.shape=%s", input_features[0].shape
+            if input_features is not None and isinstance(input_features, list)
+            and len(input_features) > 0 else input_features,
+            input_ids.shape if input_ids is not None else None,
+            positions.shape)
         encoder_outputs = self.get_encoder_outputs(input_features)
         decoder_outputs = self.decoder(
             input_ids=input_ids,
@@ -746,7 +789,7 @@ class WhisperMultiModalProcessor(
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
 class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
-                                      SupportsMultiModal, SupportsV0Only):
+                                      SupportsMultiModal):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
@@ -785,6 +828,13 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         positions: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
+        logger.info(
+            "[WHISPER DEBUG] WhisperForConditionalGeneration.forward() - "
+            "input_ids.shape=%s, positions.shape=%s, kwargs=%s",
+            input_ids.shape, positions.shape, {
+                k: (v.shape if hasattr(v, 'shape') else type(v))
+                for k, v in kwargs.items()
+            })
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         decoder_outputs = self.model(
             input_features=audio_input["input_features"],
@@ -798,10 +848,12 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
-        # TODO: This method does not obey the interface for SupportsMultiModal.
-        # Refactor this once encoder/decoder support is implemented in V1.
+        # This is used during GPU profiling. We need to actually run the input
+        # through the encoder, but there's no output to return. With Whisper,
+        # we don't use any encoder outputs as input to the decoder. We still
+        # need to run the encoder here to measure the GPU memory usage.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
-        return self.model.get_encoder_outputs(audio_input["input_features"])
+        return [self.model.get_encoder_outputs(audio_input["input_features"])]
 
     def get_input_embeddings(
         self,
@@ -876,3 +928,72 @@ def _create_fake_bias_for_k_proj(
             bias_name = name.replace("weight", "bias")
             yield from [(name, weight), (bias_name, bias)]
         yield name, weight
+
+
+class WhisperEncoderAttention(nn.Module):
+    """Whisper encoder attention using SimpleAttention (no KV cache)."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        bias: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.head_dim = self.embed_dim // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_heads * self.head_dim  # For encoder, kv_heads = heads
+        
+        if (self.head_dim * num_heads) != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: "
+                f"{self.embed_dim} and `num_heads`: {num_heads}).")
+        self.scaling = self.head_dim**-0.5
+
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_heads,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        
+        self.out_proj = RowParallelLinear(
+            input_size=embed_dim,
+            output_size=embed_dim,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
+        
+        # Use SimpleAttention for encoder attention (no KV cache needed)
+        self.attn = SimpleAttention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            scale=self.scaling,
+            num_kv_heads=self.num_heads,  # Encoder uses same number of kv heads
+            attn_type=AttentionType.ENCODER,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ):
+        """Forward pass for encoder attention."""
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # SimpleAttention handles the attention computation without KV cache
+        attn_output = self.attn(q, k, v)
+
+        output, _ = self.out_proj(attn_output)
+        return output

@@ -68,6 +68,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import is_encoder_decoder_model
 
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
@@ -715,6 +716,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.query_start_loc[:num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
 
+        # The index is the layer name for layers using KV cache.
+        # The index is the attention type, like AttentionType.ENCODER,
+        # where KV cache is not in use.
+        attn_metadata: dict[str, Any] = {}
+
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
@@ -723,7 +729,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
         )
 
-        attn_metadata: dict[str, Any] = {}
+        # Compute encoder metadata if there are encoder inputs
+        encoder_metadata = self._compute_encoder_metadata(scheduler_output)
+        if encoder_metadata:
+            attn_metadata[AttentionType.ENCODER] = self.attn_metadata_builders[0].build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                **encoder_metadata,
+            )
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -744,6 +758,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata_i = (builder.build(
                 common_prefix_len=common_prefix_len,
                 common_attn_metadata=common_attn_metadata,
+                **encoder_metadata,
             ))
 
             for layer_name in kv_cache_group_spec.layer_names:
@@ -1033,8 +1048,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **batched_mm_inputs)
+            with set_forward_context(None, self.vllm_config):
+                curr_group_outputs = self.model.get_multimodal_embeddings(
+                    **batched_mm_inputs)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -1056,6 +1072,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 output,
                 is_embed=pos_info.is_embed,
             )
+        logger.info("[GPURunner] Cached encoder outputs for %s",
+                    list(self.encoder_cache.keys()))
+        logger.info("[GPURunner] Cache content: %s", self.encoder_cache)
+        logger.info("[GPURunner] Shapes of cached encoder outputs: %s", [
+            v.shape for req_id in self.encoder_cache
+            for v in self.encoder_cache[req_id].values()
+        ])
 
     def _gather_mm_embeddings(
         self,
@@ -1102,6 +1125,160 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
+
+    def _compute_encoder_metadata(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, Any]:
+        """Compute encoder attention metadata from scheduled encoder inputs.
+        
+        Returns a dictionary with encoder metadata fields needed for attention:
+        - encoder_seq_lens: List[int] - sequence length per encoder input
+        - encoder_seq_lens_tensor: torch.Tensor - GPU tensor of sequence lengths
+        - encoder_seq_start_loc: torch.Tensor - cumulative start locations
+        - max_encoder_seq_len: int - maximum encoder sequence length
+        - num_encoder_tokens: int - total number of encoder tokens
+        """
+        if not scheduler_output.scheduled_encoder_inputs:
+            return {}
+
+        encoder_seq_lens = []
+        total_encoder_tokens = 0
+
+        # Process each request's encoder inputs
+        for req_id, encoder_input_ids in (
+                scheduler_output.scheduled_encoder_inputs.items()):
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                if mm_input_id < len(req_state.mm_inputs):
+                    mm_input = req_state.mm_inputs[mm_input_id]
+                    if "input_features" in mm_input:
+                        features = mm_input["input_features"]
+                        # For Whisper: use max_source_positions from config
+                        encoder_seq_len = getattr(self.model_config.hf_config,
+                                                  'max_source_positions', 1500)
+
+                        if isinstance(features, list):
+                            # Multiple features in list
+                            for _ in features:
+                                encoder_seq_lens.append(encoder_seq_len)
+                                total_encoder_tokens += encoder_seq_len
+                        else:
+                            # Single tensor feature
+                            encoder_seq_lens.append(encoder_seq_len)
+                            total_encoder_tokens += encoder_seq_len
+
+        if not encoder_seq_lens:
+            return {}
+
+        # Create encoder metadata
+        max_encoder_seq_len = max(encoder_seq_lens)
+
+        # Create cumulative start locations (like cu_seqlens in FlashAttention)
+        encoder_seq_start_loc = [0]
+        for seq_len in encoder_seq_lens:
+            encoder_seq_start_loc.append(encoder_seq_start_loc[-1] + seq_len)
+
+        # Convert to tensors
+        encoder_seq_lens_tensor = torch.tensor(encoder_seq_lens,
+                                               dtype=torch.int32,
+                                               device=self.device)
+        encoder_seq_start_loc_tensor = torch.tensor(encoder_seq_start_loc,
+                                                    dtype=torch.int32,
+                                                    device=self.device)
+
+        return {
+            "encoder_seq_lens": encoder_seq_lens,
+            "encoder_seq_lens_tensor": encoder_seq_lens_tensor,
+            "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
+            "max_encoder_seq_len": max_encoder_seq_len,
+            "num_encoder_tokens": total_encoder_tokens,
+        }
+
+    def _extract_encoder_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, torch.Tensor]:
+        """Extract encoder inputs for encoder-decoder models like Whisper.
+        
+        This method extracts audio input features and creates encoder positions
+        from scheduled encoder inputs. These are only needed when the encoder
+        needs to process new MM inputs (typically on the first processing step).
+        """
+        input_features_list = []
+        total_encoder_tokens = 0
+
+        for req_id, encoder_input_ids in (
+                scheduler_output.scheduled_encoder_inputs.items()):
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                if mm_input_id < len(req_state.mm_inputs):
+                    mm_input = req_state.mm_inputs[mm_input_id]
+                    # Extract input_features from MM input kwargs
+                    if "input_features" in mm_input:
+                        features = mm_input["input_features"]
+                        input_features_list.append(features)
+                        # Calculate encoder sequence length for this input
+                        if isinstance(features, torch.Tensor):
+                            # For Whisper: use max_source_positions from config
+                            # which represents the encoder sequence length
+                            encoder_seq_len = getattr(
+                                self.model_config.hf_config,
+                                'max_source_positions', 1500)
+                            total_encoder_tokens += encoder_seq_len
+                        elif isinstance(features, list):
+                            encoder_seq_len = getattr(
+                                self.model_config.hf_config,
+                                'max_source_positions', 1500)
+                            total_encoder_tokens += (len(features) *
+                                                     encoder_seq_len)
+
+        if not input_features_list:
+            return {}
+
+        # Concatenate all input features into a single tensor
+        if len(input_features_list) == 1 and isinstance(
+                input_features_list[0], torch.Tensor):
+            input_features = input_features_list[0]
+            # Ensure we have the correct 4D shape
+            #   [batch, channels, mel_bins, time]
+            if input_features.dim() == 3:
+                # Add batch dim: [ch, mel, time] -> [1, ch, mel, time]
+                input_features = input_features.unsqueeze(0)
+        else:
+            # Handle list of tensors
+            processed_features = []
+            for feat in input_features_list:
+                if isinstance(feat, torch.Tensor):
+                    # Ensure 4D shape
+                    if feat.dim() == 3:
+                        feat = feat.unsqueeze(0)
+                    processed_features.append(feat)
+                else:
+                    processed_features.append(torch.stack(feat))
+            input_features = torch.cat(processed_features)
+
+        # Move input_features to the correct device and dtype
+        input_features = input_features.to(device=self.device,
+                                           dtype=self.model_config.dtype)
+
+        # Create encoder positions (similar to how V0 does it)
+        encoder_positions = torch.arange(total_encoder_tokens,
+                                         dtype=torch.long,
+                                         device=self.device)
+
+        # Create encoder input_ids (dummy tokens for encoder)
+        encoder_input_ids = torch.zeros(total_encoder_tokens,
+                                        dtype=torch.long,
+                                        device=self.device)
+
+        return {
+            "input_features": input_features,
+            "encoder_input_ids": encoder_input_ids,
+            "encoder_positions": encoder_positions,
+        }
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1333,14 +1510,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
+        if self.is_multimodal_model and not self.is_enc_dec:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
 
-        if self.is_multimodal_model and get_pp_group().is_first_rank:
+        if self.is_multimodal_model and get_pp_group().is_first_rank and (
+                not self.is_enc_dec):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -1388,11 +1566,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
+            extra_kwargs: dict = {}
+            if self.is_enc_dec and scheduler_output.scheduled_encoder_inputs:
+                encoder_inputs = self._extract_encoder_inputs(scheduler_output)
+                extra_kwargs.update(encoder_inputs)
+
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **extra_kwargs,
             )
 
             self.maybe_wait_for_kv_save()
@@ -1819,6 +2003,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.model_memory_usage / GiB_bytes,
                     time_after_load - time_before_load)
         prepare_communication_buffer_for_model(self.model)
+        self.is_enc_dec = is_encoder_decoder_model(self.vllm_config)
 
         if is_mixture_of_experts(
                 self.model) and self.parallel_config.enable_eplb:
@@ -2042,7 +2227,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
-            if self.is_multimodal_model:
+            if self.is_multimodal_model and not self.is_enc_dec:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
@@ -2220,9 +2405,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
-                and self.encoder_cache_size > 0):
+                and (self.encoder_cache_size > 0 or self.is_enc_dec)):
 
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
@@ -2234,8 +2418,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Check how many items of this modality can be supported by
             # the encoder budget.
-            encoder_budget = min(self.max_num_encoder_input_tokens,
-                                 self.encoder_cache_size)
+            if self.is_enc_dec or (self.max_num_encoder_input_tokens
+                                   < self.encoder_cache_size):
+                encoder_budget = self.max_num_encoder_input_tokens
+            else:
+                encoder_budget = self.encoder_cache_size
 
             max_num_mm_items_encoder_budget = cdiv(encoder_budget,
                                                    max_tokens_per_mm_item)
@@ -2277,12 +2464,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             # Run multimodal encoder.
-            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
-                **batched_dummy_mm_inputs)
+            with set_forward_context(None, self.vllm_config):
+                dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    **batched_dummy_mm_inputs)
+
+            # for enc-dec models, we have a single hidden states output
+            # from the encoder, used as input into cross-attention for the
+            # decoder.
+            expected_num_items = 1 if self.is_enc_dec else max_num_mm_items
 
             sanity_check_mm_encoder_outputs(
                 dummy_encoder_outputs,
-                expected_num_items=max_num_mm_items,
+                expected_num_items=expected_num_items,
             )
 
             # Cache the dummy encoder outputs.
@@ -2614,20 +2807,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla)
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
+                # Cross-attention needs KV cache for encoder keys/values
+                if attn_module.sliding_window is not None:
+                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        sliding_window=attn_module.sliding_window,
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
+                else:
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        use_mla=use_mla,
+                        attn_type=str(attn_module.attn_type))
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")

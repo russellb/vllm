@@ -1103,6 +1103,90 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
+    def _extract_encoder_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, torch.Tensor]:
+        """Extract encoder inputs for encoder-decoder models like Whisper.
+
+        This method extracts audio input features and creates encoder positions
+        from scheduled encoder inputs. These are only needed when the encoder
+        needs to process new MM inputs (typically on the first processing step).
+        """
+        input_features_list = []
+        total_encoder_tokens = 0
+
+        for req_id, encoder_input_ids in (
+                scheduler_output.scheduled_encoder_inputs.items()):
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                if mm_input_id < len(req_state.mm_inputs):
+                    mm_input = req_state.mm_inputs[mm_input_id]
+                    # Extract input_features from MM input kwargs
+                    if "input_features" in mm_input:
+                        features = mm_input["input_features"]
+                        input_features_list.append(features)
+                        # Calculate encoder sequence length for this input
+                        if isinstance(features, torch.Tensor):
+                            # For Whisper: use max_source_positions from config
+                            # which represents the encoder sequence length
+                            encoder_seq_len = getattr(
+                                self.model_config.hf_config,
+                                'max_source_positions', 1500)
+                            total_encoder_tokens += encoder_seq_len
+                        elif isinstance(features, list):
+                            encoder_seq_len = getattr(
+                                self.model_config.hf_config,
+                                'max_source_positions', 1500)
+                            total_encoder_tokens += (len(features) *
+                                                     encoder_seq_len)
+
+        if not input_features_list:
+            return {}
+
+        # Concatenate all input features into a single tensor
+        if len(input_features_list) == 1 and isinstance(
+                input_features_list[0], torch.Tensor):
+            input_features = input_features_list[0]
+            # Ensure we have the correct 4D shape
+            #   [batch, channels, mel_bins, time]
+            if input_features.dim() == 3:
+                # Add batch dim: [ch, mel, time] -> [1, ch, mel, time]
+                input_features = input_features.unsqueeze(0)
+        else:
+            # Handle list of tensors
+            processed_features = []
+            for feat in input_features_list:
+                if isinstance(feat, torch.Tensor):
+                    # Ensure 4D shape
+                    if feat.dim() == 3:
+                        feat = feat.unsqueeze(0)
+                    processed_features.append(feat)
+                else:
+                    processed_features.append(torch.stack(feat))
+            input_features = torch.cat(processed_features)
+
+        # Move input_features to the correct device and dtype
+        input_features = input_features.to(device=self.device,
+                                           dtype=self.model_config.dtype)
+
+        # Create encoder positions (similar to how V0 does it)
+        encoder_positions = torch.arange(total_encoder_tokens,
+                                         dtype=torch.long,
+                                         device=self.device)
+
+        # Create encoder input_ids (dummy tokens for encoder)
+        encoder_input_ids = torch.zeros(total_encoder_tokens,
+                                        dtype=torch.long,
+                                        device=self.device)
+
+        return {
+            "input_features": input_features,
+            "encoder_input_ids": encoder_input_ids,
+            "encoder_positions": encoder_positions,
+        }
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -1390,11 +1474,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
+            extra_kwargs: dict = {}
+            if (self.model_config.is_encoder_decoder
+                    and scheduler_output.scheduled_encoder_inputs):
+                encoder_inputs = self._extract_encoder_inputs(scheduler_output)
+                extra_kwargs.update(encoder_inputs)
+
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **extra_kwargs,
             )
 
             self.maybe_wait_for_kv_save()

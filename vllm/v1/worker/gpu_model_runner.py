@@ -1316,14 +1316,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
+        if (self.is_multimodal_model
+                and not self.model_config.is_encoder_decoder):
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
 
-        if self.is_multimodal_model and get_pp_group().is_first_rank:
+        if self.is_multimodal_model and get_pp_group().is_first_rank and (
+                not self.model_config.is_encoder_decoder):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.

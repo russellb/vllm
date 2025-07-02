@@ -68,7 +68,6 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import is_encoder_decoder_model
 
 from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
@@ -1831,8 +1830,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.parallel_config,
             )
 
-        self.is_enc_dec = is_encoder_decoder_model(self.vllm_config)
-
     def save_tensorized_model(
         self,
         tensorizer_config: "TensorizerConfig",
@@ -2045,7 +2042,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
-            if self.is_multimodal_model and not self.is_enc_dec:
+            if (self.is_multimodal_model
+                    and not self.model_config.is_encoder_decoder):
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
@@ -2224,7 +2222,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
-                and self.encoder_cache_size > 0 and not self.is_enc_dec):
+                and self.encoder_cache_size > 0
+                and not self.model_config.is_encoder_decoder):
 
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when

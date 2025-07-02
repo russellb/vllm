@@ -708,6 +708,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         attn_metadata: dict[str, Any] = {}
+
+        # Prepare encoder attention metadata separately
+        # (encoder layers are not in KV cache groups)
+        if (self.model_config.is_encoder_decoder
+                and hasattr(scheduler_output, 'scheduled_encoder_inputs')
+                and scheduler_output.scheduled_encoder_inputs):
+            encoder_attn_metadata = self._create_encoder_attention_metadata(
+                scheduler_output)
+
+            # Add encoder attention metadata for all encoder layers
+            from vllm.attention import AttentionType
+            from vllm.attention.layer import Attention
+            from vllm.config import get_layers_from_vllm_config
+            attention_layers = get_layers_from_vllm_config(
+                self.vllm_config, Attention)
+            for layer_name, attn_module in attention_layers.items():
+                if attn_module.attn_type == AttentionType.ENCODER:
+                    attn_metadata[layer_name] = encoder_attn_metadata
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -2836,3 +2855,64 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "the mamba page size")
 
         return attn_page_size
+
+    def _create_encoder_attention_metadata(
+            self, scheduler_output: "SchedulerOutput") -> dict[str, Any]:
+        """Prepare encoder attention metadata for encoder-decoder models."""
+        from vllm.utils import async_tensor_h2d
+
+        # Get encoder input information from scheduled encoder inputs
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+
+        # Calculate encoder sequence lengths
+        encoder_seq_lens = []
+        num_encoder_tokens = 0
+
+        for encoder_input in scheduled_encoder_inputs:
+            # For Whisper, encoder sequence length
+            # is determined by max_source_positions
+            encoder_seq_len = self.model_config.hf_config.max_source_positions
+            encoder_seq_lens.append(encoder_seq_len)
+            num_encoder_tokens += encoder_seq_len
+
+        # Create encoder sequence start locations (cumulative sum)
+        encoder_seq_start_loc = [0]
+        for seq_len in encoder_seq_lens:
+            encoder_seq_start_loc.append(encoder_seq_start_loc[-1] + seq_len)
+
+        max_encoder_seq_len = max(encoder_seq_lens) if encoder_seq_lens else 0
+
+        # Convert to tensors
+        encoder_seq_lens_tensor = async_tensor_h2d(encoder_seq_lens, torch.int,
+                                                   self.device,
+                                                   self.pin_memory)
+        encoder_seq_start_loc_tensor = async_tensor_h2d(
+            encoder_seq_start_loc, torch.int32, self.device, self.pin_memory)
+
+        encoder_metadata = {
+            "encoder_seq_lens": encoder_seq_lens,
+            "encoder_seq_lens_tensor": encoder_seq_lens_tensor,
+            "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
+            "max_encoder_seq_len": max_encoder_seq_len,
+            "num_encoder_tokens": num_encoder_tokens,
+        }
+
+        # Use the first attention metadata builder
+        # to create encoder attention metadata
+        builder = self.attn_metadata_builders[0]
+
+        # Create encoder-specific common attention metadata
+        encoder_common_metadata = CommonAttentionMetadata(
+            query_start_loc=encoder_metadata["encoder_seq_start_loc"],
+            seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
+            num_reqs=len(encoder_metadata["encoder_seq_lens"]),
+            num_actual_tokens=encoder_metadata["num_encoder_tokens"],
+            max_query_len=encoder_metadata["max_encoder_seq_len"],
+        )
+
+        # Build encoder attention metadata using the builder
+        return builder.build(
+            common_prefix_len=0,  # No cascade for encoder
+            common_attn_metadata=encoder_common_metadata,
+            **encoder_metadata,
+        )

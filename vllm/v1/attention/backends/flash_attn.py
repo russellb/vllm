@@ -583,6 +583,18 @@ class FlashAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # Handle encoder attention differently - no KV cache needed
+        if attn_type == AttentionType.ENCODER:
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return self._forward_encoder_attention(query[:num_actual_tokens],
+                                                   key[:num_actual_tokens],
+                                                   value[:num_actual_tokens],
+                                                   output[:num_actual_tokens],
+                                                   attn_metadata, layer)
+
+        # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_sharing_target_layer_name is None:
@@ -662,33 +674,78 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
-        assert not use_local_attn, (
-            "Cascade attention does not support local attention.")
-        # Cascade attention (rare case).
-        cascade_attention(
-            output[:num_actual_tokens],
-            query[:num_actual_tokens],
-            key_cache,
-            value_cache,
-            cu_query_lens=attn_metadata.query_start_loc,
-            max_query_len=attn_metadata.max_query_len,
-            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            prefix_kv_lens=attn_metadata.prefix_kv_lens,
-            suffix_kv_lens=attn_metadata.suffix_kv_lens,
-            max_kv_len=attn_metadata.max_seq_len,
+    def _forward_encoder_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Forward pass for encoder attention without KV cache.
+
+        Args:
+            query: shape = [num_encoder_tokens, num_heads, head_size]
+            key: shape = [num_encoder_tokens, num_kv_heads, head_size]
+            value: shape = [num_encoder_tokens, num_kv_heads, head_size]
+            output: shape = [num_encoder_tokens, num_heads, head_size]
+            attn_metadata: Encoder attention metadata
+            layer: The attention layer
+        """
+        # For encoder attention, process FP8 quantization if needed
+        if self.kv_cache_dtype.startswith("fp8"):
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
+
+            num_kv_tokens, num_kv_heads, head_size = key.shape
+            key, _ = ops.scaled_fp8_quant(
+                key.reshape(
+                    (num_kv_tokens, num_kv_heads * head_size)).contiguous(),
+                layer._k_scale)
+            key = key.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+            value, _ = ops.scaled_fp8_quant(
+                value.reshape(
+                    (num_kv_tokens, num_kv_heads * head_size)).contiguous(),
+                layer._v_scale)
+            value = value.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+        # Use encoder-specific metadata for sequence information
+        cu_seqlens_q = attn_metadata.encoder_seq_start_loc
+        cu_seqlens_k = attn_metadata.encoder_seq_start_loc
+        max_seqlen_q = attn_metadata.max_encoder_seq_len
+        max_seqlen_k = attn_metadata.max_encoder_seq_len
+
+        descale_shape = (
+            cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
+            key.shape[1])
+
+        # Call flash attention directly on Q, K, V tensors
+        flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            out=output,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
+            causal=False,  # Encoder attention is bidirectional
             alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
-            block_table=attn_metadata.block_table,
-            common_prefix_len=attn_metadata.common_prefix_len,
+            window_size=self.sliding_window,
+            softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
-            suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
-            q_descale=layer._q_scale,
-            k_descale=layer._k_scale,
-            v_descale=layer._v_scale,
+            q_descale=layer._q_scale.expand(descale_shape),
+            k_descale=layer._k_scale.expand(descale_shape),
+            v_descale=layer._v_scale.expand(descale_shape),
         )
+
         return output
 
 

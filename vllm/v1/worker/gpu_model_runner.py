@@ -2045,7 +2045,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
-            if self.is_multimodal_model:
+            if self.is_multimodal_model and not self.is_enc_dec:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
@@ -2223,9 +2223,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
-                and self.encoder_cache_size > 0):
+                and self.encoder_cache_size > 0 and not self.is_enc_dec):
 
             # NOTE: Currently model is profiled with a single non-text
             # modality with the max possible input tokens even when
@@ -2609,7 +2608,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            if attn_module.attn_type == AttentionType.DECODER:
+            # TODO ENCODER_DECODER probably needs different handling here, but
+            # it is included here temporarily to allow startup to complete.
+            # I will come back to this once the encoder side is fully working.
+            if attn_module.attn_type in (AttentionType.DECODER,
+                                         AttentionType.ENCODER_DECODER):
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2629,8 +2632,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
                 continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
             else:
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")

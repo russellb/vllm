@@ -130,6 +130,25 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
     max_num_splits: int = 0
 
+    # Begin encoder attn & enc/dec cross-attn fields...
+
+    # Encoder sequence lengths representation
+    encoder_seq_lens: Optional[list[int]] = None
+    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
+    # (batch_size + 1,). The cumulative sequence lengths of the encoder
+    # sequences in the batch, used to index into sequence. E.g., if the sequence
+    # length is [4, 6], it is [0, 4, 10].
+    encoder_seq_start_loc: Optional[torch.Tensor] = None
+    # Maximum sequence length among encoder sequences
+    max_encoder_seq_len: Optional[int] = None
+    # Number of tokens input to encoder
+    num_encoder_tokens: Optional[int] = None
+
+    # Cross-attention memory-mapping data structures: slot mapping
+    # and block tables
+    cross_slot_mapping: Optional[torch.Tensor] = None
+    cross_block_tables: Optional[torch.Tensor] = None
+
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -141,6 +160,41 @@ class FlashAttentionMetadata:
         local_scheduler_metadata: Optional[torch.Tensor]
 
     local_attn_metadata: Optional[LocalAttentionMetadata] = None
+
+    @property
+    def is_all_encoder_attn_metadata_set(self) -> bool:
+        """
+        All attention metadata required for encoder attention is set.
+        """
+        res = (self.encoder_seq_lens is not None
+               and self.encoder_seq_lens_tensor is not None
+               and self.encoder_seq_start_loc is not None
+               and self.max_encoder_seq_len is not None
+               and self.num_encoder_tokens is not None)
+        if not res:
+            # rewrite without using f-string
+            logger.info(
+                "[FLASH_ATTN DEBUG] "
+                "Encoder attention metadata is not fully set. "
+                "encoder_seq_lens: %s, "
+                "encoder_seq_lens_tensor: %s, "
+                "encoder_seq_start_loc: %s, "
+                "max_encoder_seq_len: %s, "
+                "num_encoder_tokens: %s", self.encoder_seq_lens,
+                self.encoder_seq_lens_tensor, self.encoder_seq_start_loc,
+                self.max_encoder_seq_len, self.num_encoder_tokens)
+        return res
+
+    @property
+    def is_all_cross_attn_metadata_set(self) -> bool:
+        """
+        All attention metadata required for enc/dec cross-attention is set.
+        
+        Superset of encoder attention required metadata.
+        """
+        return (self.is_all_encoder_attn_metadata_set
+                and self.cross_slot_mapping is not None
+                and self.cross_block_tables is not None)
 
 
 def _get_sliding_window_configs(
@@ -208,9 +262,17 @@ class FlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
     def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
-    ) -> FlashAttentionMetadata:
+            self,
+            common_prefix_len: int,
+            common_attn_metadata: CommonAttentionMetadata,
+            # Encoder/cross-attention metadata (optional)
+            encoder_seq_lens: Optional[list[int]] = None,
+            encoder_seq_lens_tensor: Optional[torch.Tensor] = None,
+            encoder_seq_start_loc: Optional[torch.Tensor] = None,
+            max_encoder_seq_len: Optional[int] = None,
+            num_encoder_tokens: Optional[int] = None,
+            cross_slot_mapping: Optional[torch.Tensor] = None,
+            cross_block_tables: Optional[torch.Tensor] = None):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -375,6 +437,14 @@ class FlashAttentionMetadataBuilder(
             local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
+            # Encoder/cross-attention fields
+            encoder_seq_lens=encoder_seq_lens,
+            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
+            encoder_seq_start_loc=encoder_seq_start_loc,
+            max_encoder_seq_len=max_encoder_seq_len,
+            num_encoder_tokens=num_encoder_tokens,
+            cross_slot_mapping=cross_slot_mapping,
+            cross_block_tables=cross_block_tables,
         )
         return attn_metadata
 
@@ -429,17 +499,31 @@ class FlashAttentionImpl(AttentionImpl):
 
         FlashAttentionBackend.validate_head_size(head_size)
 
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashAttentionImpl")
+        self.attn_type = attn_type
         self.use_irope = use_irope
         self.vllm_flash_attn_version = get_flash_attn_version()
         if is_quantized_kv_cache(self.kv_cache_dtype) \
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
+
+    @staticmethod
+    def _get_causal_option(attn_type: str) -> bool:
+        """
+        Determine whether the given attention type is suitable for causal 
+        attention mechanisms.
+
+        Args:
+            attn_type (AttentionType): The type of attention being evaluated
+
+        Returns:
+            bool: Returns `True` if the attention type is suitable for causal 
+            attention (i.e., not encoder, encoder-only, or encoder-decoder), 
+            otherwise returns `False`.
+        """
+        return not (attn_type == AttentionType.ENCODER
+                    or attn_type == AttentionType.ENCODER_ONLY
+                    or attn_type == AttentionType.ENCODER_DECODER)
 
     def forward(
         self,
@@ -476,6 +560,18 @@ class FlashAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
+
+        # Validate attention metadata based on attention type
+        attn_type = self.attn_type
+        if (attn_type == AttentionType.ENCODER
+                and (not attn_metadata.is_all_encoder_attn_metadata_set)):
+            raise AttributeError("Encoder attention requires setting "
+                                 "encoder metadata attributes.")
+        elif (attn_type == AttentionType.ENCODER_DECODER
+              and (not attn_metadata.is_all_cross_attn_metadata_set)):
+            raise AttributeError("Encoder/decoder cross-attention "
+                                 "requires setting cross-attention "
+                                 "metadata attributes.")
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -552,7 +648,7 @@ class FlashAttentionImpl(AttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
-                causal=True,
+                causal=FlashAttentionImpl._get_causal_option(attn_type),
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,

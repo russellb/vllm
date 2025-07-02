@@ -697,6 +697,15 @@ class FlashAttentionImpl(AttentionImpl):
                 "fused output quantization is not yet supported"
                 " for FlashAttentionImpl")
 
+        import os
+        if os.environ.get("FLASH_ATTN_DEBUG", "0") == "1":
+            # log all inputs
+            logger.info(
+                "[FLASH_ATTN DEBUG V0] "
+                "query: %s, key: %s, value: %s, kv_cache: %s, "
+                "attn_metadata: %s", query, key, value, kv_cache,
+                attn_metadata)
+
         # NOTE(woosuk): FlashAttention2 does not support FP8 KV cache.
         if not flash_attn_supports_fp8() or output.dtype != torch.bfloat16:
             assert (

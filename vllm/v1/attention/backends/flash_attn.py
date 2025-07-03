@@ -600,7 +600,9 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if self.kv_sharing_target_layer_name is None:
+        if (self.kv_sharing_target_layer_name is None
+                and attn_type != AttentionType.ENCODER and (key is not None)
+                and (value is not None)):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping is
@@ -608,12 +610,24 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
+            # We skip updating the KV cache under two conditions:
+            #  a. When the Attention Type is ENCODER. In this phase, we compute
+            #     only the encoder attention without updating the cache.
+            #  b. When both Key and Value are None. This occurs during
+            #     cross-attention computation in the decoding phase, where the
+            #     KV cache is already populated with the cross-attention
+            #     tensor. Thus, we skip cache updates during this time.
+            if attn_type == AttentionType.ENCODER_DECODER:
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                updated_slot_mapping = attn_metadata.slot_mapping
+
             reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                attn_metadata.slot_mapping,
+                updated_slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
@@ -628,6 +642,13 @@ class FlashAttentionImpl(AttentionImpl):
                     (num_tokens, num_heads * head_size)).contiguous(),
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
+
+        if attn_type == AttentionType.ENCODER_DECODER:
+            return self._forward_cross_attention(query[:num_actual_tokens],
+                                                 key, value,
+                                                 output[:num_actual_tokens],
+                                                 key_cache, value_cache,
+                                                 attn_metadata, layer)
 
         # Compute attention and update output up to `num_actual_tokens`.
         use_local_attn = \
@@ -748,6 +769,122 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
         )
+
+        return output
+
+    def _forward_cross_attention(
+        self,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
+        output: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
+        """Forward pass for encoder-decoder cross-attention.
+        
+        Args:
+            query: shape = [num_decoder_tokens, num_heads, head_size] 
+            key: shape = [num_encoder_tokens, num_kv_heads, head_size] or None
+            (decode phase) value: shape = [num_encoder_tokens, num_kv_heads,
+            head_size] or None (decode phase)
+            output: shape = [num_decoder_tokens, num_heads, head_size]
+            key_cache: Cross-attention key cache
+            value_cache: Cross-attention value cache  
+            attn_metadata: Cross-attention metadata
+            layer: The attention layer
+        """
+        # Process FP8 quantization for query if needed
+        if self.kv_cache_dtype.startswith("fp8"):
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
+
+            # Process K, V if provided (prefill phase)
+            if key is not None and value is not None:
+                num_kv_tokens, num_kv_heads, head_size = key.shape
+                key, _ = ops.scaled_fp8_quant(
+                    key.reshape((num_kv_tokens,
+                                 num_kv_heads * head_size)).contiguous(),
+                    layer._k_scale)
+                key = key.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+                value, _ = ops.scaled_fp8_quant(
+                    value.reshape((num_kv_tokens,
+                                   num_kv_heads * head_size)).contiguous(),
+                    layer._v_scale)
+                value = value.reshape((num_kv_tokens, num_kv_heads, head_size))
+
+        # Get cross-attention sequence metadata
+        q_seq_start_loc, q_max_seq_len, k_seq_start_loc, k_max_seq_len = (
+            attn_metadata.query_start_loc,  # Decoder sequence start locations
+            attn_metadata.max_query_len,  # Max decoder sequence length
+            attn_metadata.
+            encoder_seq_start_loc,  # Encoder sequence start locations  
+            attn_metadata.max_encoder_seq_len  # Max encoder sequence length
+        )
+
+        if key is not None and value is not None:
+            # Prefill phase: direct attention between query and key/value
+            descale_shape = (q_seq_start_loc.shape[0] - 1, key.shape[1])
+
+            flash_attn_varlen_func(
+                q=query,
+                k=key,
+                v=value,
+                out=output,
+                cu_seqlens_q=q_seq_start_loc,
+                cu_seqlens_k=k_seq_start_loc,
+                max_seqlen_q=q_max_seq_len,
+                max_seqlen_k=k_max_seq_len,
+                softmax_scale=self.scale,
+                causal=False,  # Cross-attention is not causal
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+            )
+        else:
+            # Decode phase: attention between query
+            # and cached cross-attention K/V
+            if self.kv_cache_dtype.startswith("fp8"):
+                key_cache = key_cache.view(torch.float8_e4m3fn)
+                value_cache = value_cache.view(torch.float8_e4m3fn)
+
+            # Use cross-attention block tables and sequence lengths
+            block_table = attn_metadata.cross_block_tables
+            encoder_seq_lens = attn_metadata.encoder_seq_lens_tensor
+
+            descale_shape = (q_seq_start_loc.shape[0] - 1, key_cache.shape[-2])
+
+            flash_attn_varlen_func(
+                q=query,
+                k=key_cache,
+                v=value_cache,
+                out=output,
+                cu_seqlens_q=q_seq_start_loc,
+                max_seqlen_q=q_max_seq_len,
+                seqused_k=encoder_seq_lens,
+                max_seqlen_k=k_max_seq_len,
+                softmax_scale=self.scale,
+                causal=False,  # Cross-attention is not causal
+                alibi_slopes=self.alibi_slopes,
+                window_size=self.sliding_window,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
+            )
 
         return output
 

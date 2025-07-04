@@ -32,6 +32,8 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    has_encoder_inputs: bool
+    encoder_input_length: int
 
     @classmethod
     def from_request(
@@ -50,6 +52,9 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            has_encoder_inputs=request.has_encoder_inputs,
+            encoder_input_length=sum(pos.length
+                                     for pos in request.mm_positions),
         )
 
     def __repr__(self):
@@ -62,7 +67,9 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"has_encoder_inputs={self.has_encoder_inputs},"
+                f"encoder_input_length={self.encoder_input_length}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -76,7 +83,9 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"has_encoder_inputs={self.has_encoder_inputs},"
+                f"encoder_input_length={self.encoder_input_length}"
                 ")")
 
 

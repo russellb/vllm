@@ -161,7 +161,6 @@ class FlashAttentionMetadata:
                and self.max_encoder_seq_len is not None
                and self.num_encoder_tokens is not None)
         if not res:
-            # rewrite without using f-string
             logger.info(
                 "[FLASH_ATTN DEBUG] "
                 "Encoder attention metadata is not fully set. "
@@ -181,9 +180,19 @@ class FlashAttentionMetadata:
         
         Superset of encoder attention required metadata.
         """
-        return (self.is_all_encoder_attn_metadata_set
-                and self.cross_slot_mapping is not None
-                and self.cross_block_tables is not None)
+        retval = (self.is_all_encoder_attn_metadata_set
+                  and self.cross_slot_mapping is not None
+                  and self.cross_block_tables is not None)
+        res = (self.cross_slot_mapping is not None
+               or self.cross_block_tables is not None)
+        if not res:
+            logger.info(
+                "[FLASH_ATTN DEBUG] "
+                "Cross-attention metadata is not fully set. "
+                "cross_slot_mapping: %s, "
+                "cross_block_tables: %s", self.cross_slot_mapping,
+                self.cross_block_tables)
+        return retval
 
 
 def _get_sliding_window_configs(
@@ -830,7 +839,8 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         if key is not None and value is not None:
-            # Prefill phase: direct attention between query and key/value
+            # First forward pass in the decoder.
+            # Future cross-attention queries will use cached K/V.
             descale_shape = (q_seq_start_loc.shape[0] - 1, key.shape[1])
 
             flash_attn_varlen_func(

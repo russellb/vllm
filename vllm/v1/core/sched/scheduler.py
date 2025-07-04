@@ -284,6 +284,27 @@ class Scheduler(SchedulerInterface):
                 break
             assert new_blocks is not None
 
+            # For encoder-decoder models, allocate cross-attention blocks
+            if (self.vllm_config.model_config.is_encoder_decoder
+                    and request.has_encoder_inputs):
+                # Assume cross-attention is KV cache group 1
+                # (group 0 is self-attention)
+                cross_attn_blocks = (
+                    self.kv_cache_manager.allocate_cross_attention_blocks(
+                        request, cross_attention_group_id=1))
+                if cross_attn_blocks is None:
+                    # Cross-attention allocation failed, cannot schedule
+                    self.kv_cache_manager.free(request)
+                    can_schedule = False
+                    break
+                # Merge cross-attention blocks with regular blocks
+                combined_blocks = new_blocks + cross_attn_blocks
+                req_to_new_block_ids[request.request_id] = (
+                    combined_blocks.get_block_ids())
+            else:
+                req_to_new_block_ids[request.request_id] = (
+                    new_blocks.get_block_ids())
+
             # Schedule the request.
             scheduled_running_reqs.append(request)
             if request.use_structured_output:
@@ -292,8 +313,6 @@ class Scheduler(SchedulerInterface):
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
                 structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[request.request_id] = (
-                new_blocks.get_block_ids())
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -451,6 +470,23 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     break
 
+                # For encoder-decoder models, allocate cross-attention blocks
+                if (self.vllm_config.model_config.is_encoder_decoder
+                        and request.has_encoder_inputs):
+                    # Assume cross-attention is KV cache group 1
+                    # (group 0 is self-attention)
+                    cross_attn_blocks = (
+                        self.kv_cache_manager.allocate_cross_attention_blocks(
+                            request, cross_attention_group_id=1))
+                    if cross_attn_blocks is None:
+                        # Cross-attention allocation failed, cannot schedule
+                        break
+                    # Merge cross-attention blocks with regular blocks
+                    combined_blocks = new_blocks + cross_attn_blocks
+                    all_blocks = new_computed_blocks + combined_blocks
+                else:
+                    all_blocks = new_computed_blocks + new_blocks
+
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
@@ -458,7 +494,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        all_blocks,
                         num_external_computed_tokens,
                     )
 

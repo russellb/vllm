@@ -388,6 +388,60 @@ class KVCacheManager:
             self.coordinator.cache_blocks(request, block_hashes,
                                           num_computed_tokens)
 
+    def allocate_cross_attention_blocks(
+            self, request: Request,
+            cross_attention_group_id: int) -> Optional[KVCacheBlocks]:
+        """Allocate cross-attention blocks for encoder-decoder models.
+        
+        Cross-attention blocks are allocated once per request (not per sequence)
+        and store the encoder states that are shared across all decoder
+        sequences.
+        
+        Args:
+            request: The request to allocate cross-attention blocks for.
+            cross_attention_group_id: The KV cache group ID for cross-attention.
+            
+        Returns:
+            The allocated cross-attention blocks, or None if allocation failed.
+        """
+        if not request.has_encoder_inputs:
+            return self.create_empty_block_list()
+
+        # Calculate total encoder tokens across all multimodal inputs
+        total_encoder_tokens = sum(pos.length for pos in request.mm_positions)
+
+        # Get the cross-attention KV cache spec
+        cross_attn_spec = self.kv_cache_config.kv_cache_groups[
+            cross_attention_group_id].kv_cache_spec
+        cross_attn_block_size = cross_attn_spec.block_size
+
+        # Calculate number of blocks needed for encoder tokens
+        num_blocks_needed = (total_encoder_tokens + cross_attn_block_size -
+                             1) // cross_attn_block_size
+
+        # Check if we have enough free blocks
+        if num_blocks_needed > self.block_pool.get_num_free_blocks():
+            return None
+
+        # Allocate blocks specifically for this cross-attention group
+        cross_attention_blocks = self.block_pool.get_new_blocks(
+            num_blocks_needed)
+        if len(cross_attention_blocks) < num_blocks_needed:
+            # Not enough blocks available, free any we got and return None
+            if cross_attention_blocks:
+                self.block_pool.free_blocks(cross_attention_blocks)
+            return None
+
+        # Create KVCacheBlocks with cross-attention blocks in the right group
+        blocks_per_group = []
+        for i in range(self.num_kv_cache_groups):
+            if i == cross_attention_group_id:
+                blocks_per_group.append(cross_attention_blocks)
+            else:
+                blocks_per_group.append([])
+
+        return KVCacheBlocks(tuple(blocks_per_group))
+
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
         return KVCacheBlocks(tuple([]

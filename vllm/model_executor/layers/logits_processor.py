@@ -105,6 +105,20 @@ class LogitsProcessor(nn.Module):
         lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
+        # Debug logging for tensor shapes and dtypes
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"[DEBUG] hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}"
+        )
+        logger.warning(
+            f"[DEBUG] lm_head.weight shape: {lm_head.weight.shape}, dtype: {lm_head.weight.dtype}"
+        )
+        if embedding_bias is not None:
+            logger.warning(
+                f"[DEBUG] embedding_bias shape: {embedding_bias.shape}, dtype: {embedding_bias.dtype}"
+            )
+
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head,
                                             hidden_states,

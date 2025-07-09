@@ -583,7 +583,8 @@ class FlashAttentionImpl(AttentionImpl):
               and (not attn_metadata.is_all_cross_attn_metadata_set)):
             raise AttributeError("Encoder/decoder cross-attention "
                                  "requires setting cross-attention "
-                                 "metadata attributes.")
+                                 "metadata attributes."
+                                 f"Layer: {layer.layer_name}")
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

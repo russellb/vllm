@@ -188,6 +188,7 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
+        req_to_cross_attn_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -283,27 +284,12 @@ class Scheduler(SchedulerInterface):
             if not can_schedule:
                 break
             assert new_blocks is not None
+            req_to_new_block_ids[request.request_id] = (
+                new_blocks.get_block_ids())
 
-            # For encoder-decoder models, allocate cross-attention blocks
-            if (self.vllm_config.model_config.is_encoder_decoder
-                    and request.has_encoder_inputs):
-                # Assume cross-attention is KV cache group 1
-                # (group 0 is self-attention)
-                cross_attn_blocks = (
-                    self.kv_cache_manager.allocate_cross_attention_blocks(
-                        request, cross_attention_group_id=1))
-                if cross_attn_blocks is None:
-                    # Cross-attention allocation failed, cannot schedule
-                    self.kv_cache_manager.free(request)
-                    can_schedule = False
-                    break
-                # Merge cross-attention blocks with regular blocks
-                combined_blocks = new_blocks + cross_attn_blocks
-                req_to_new_block_ids[request.request_id] = (
-                    combined_blocks.get_block_ids())
-            else:
-                req_to_new_block_ids[request.request_id] = (
-                    new_blocks.get_block_ids())
+            # NOTE: we only need to allocate cross-attention blocks when we
+            # first schedule the request. In this block, we are handling running
+            # requests, so the cross-attention blocks have already been allocated.
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -477,10 +463,12 @@ class Scheduler(SchedulerInterface):
                     # (group 0 is self-attention)
                     cross_attn_blocks = (
                         self.kv_cache_manager.allocate_cross_attention_blocks(
-                            request, cross_attention_group_id=1))
+                            request))
                     if cross_attn_blocks is None:
                         # Cross-attention allocation failed, cannot schedule
                         break
+                    req_to_cross_attn_block_ids[request.request_id] = (
+                        cross_attn_blocks.get_block_ids())
                     # Merge cross-attention blocks with regular blocks
                     combined_blocks = new_blocks + cross_attn_blocks
                     all_blocks = new_computed_blocks + combined_blocks
@@ -576,8 +564,9 @@ class Scheduler(SchedulerInterface):
         )
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
+            NewRequestData.from_request(
+                req, req_to_new_block_ids[req.request_id],
+                req_to_cross_attn_block_ids.get(req.request_id))
             for req in scheduled_new_reqs
         ]
         cached_reqs_data = self._make_cached_request_data(
@@ -586,6 +575,7 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens,
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
+            req_to_cross_attn_block_ids,
         )
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -651,10 +641,12 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_block_ids: dict[str, tuple[list[int], ...]],
+        req_to_cross_attn_block_ids: dict[str, tuple[list[int], ...]],
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...]] = []
+        cross_attn_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
 
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -672,6 +664,7 @@ class Scheduler(SchedulerInterface):
                                               num_computed_tokens + num_tokens]
                 new_token_ids.append(token_ids)
             new_block_ids.append(req_to_new_block_ids[req_id])
+            cross_attn_block_ids.append(req_to_cross_attn_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
@@ -683,6 +676,7 @@ class Scheduler(SchedulerInterface):
             resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
+            cross_attn_block_ids=cross_attn_block_ids,
             num_computed_tokens=num_computed_tokens,
         )
 

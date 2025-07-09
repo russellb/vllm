@@ -50,8 +50,9 @@ from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec, MambaSpec,
+from vllm.v1.kv_cache_interface import (AttentionSpec, CrossAttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -425,6 +426,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
+                cross_attn_block_ids=new_req_data.cross_attn_block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
@@ -727,8 +729,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
+        encoder_attn_metadata = None
         if (self.model_config.is_encoder_decoder
-                and hasattr(scheduler_output, 'scheduled_encoder_inputs')
                 and scheduler_output.scheduled_encoder_inputs):
             encoder_attn_metadata = self._create_encoder_attention_metadata(
                 scheduler_output)
@@ -747,63 +749,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-            builder = self.attn_metadata_builders[kv_cache_group_id]
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
-                    kv_cache_group_spec.kv_cache_spec,
-                    builder,
-                )
-
-            # Check if this is a cross-attention KV cache group
-            cross_block_tables = None
-            cross_slot_mapping = None
-
-            if (self.model_config.is_encoder_decoder and kv_cache_group_id
-                    == 1):  # Assume group 1 is cross-attention
-                # Build cross-attention metadata for encoder-decoder models
-                cross_block_tables = []
-                cross_slot_mapping = []
-
-                for req_id in req_ids:
-                    req_data = None
-                    # Find request data in scheduler output
-                    for new_req in scheduler_output.scheduled_new_reqs:
-                        if new_req.req_id == req_id:
-                            req_data = new_req
-                            break
-
-                    if req_data and req_data.has_encoder_inputs:
-                        # Get cross-attention blocks (group 1)
-                        cross_blocks = req_data.block_ids[1] if len(
-                            req_data.block_ids) > 1 else []
-                        cross_block_tables.append(cross_blocks)
-
-                        # Build slot mapping for this request's encoder tokens
-                        cross_slots = self._build_cross_attn_slot_mapping(
-                            cross_blocks,
-                            req_data.encoder_input_length,
-                            cross_attention_group_id=1)
-                        cross_slot_mapping.extend(cross_slots)
-                    else:
-                        cross_block_tables.append([])
-
-            extra_cross_attn_metadata = {
-                "cross_block_tables": cross_block_tables,
-                "cross_slot_mapping": cross_slot_mapping,
-            }
-            attn_metadata_i = (builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-                **extra_cross_attn_metadata,
-            ))
+            logger.info("[GPU MODEL RUNNER DEBUG] KV cache group %d: %s",
+                        kv_cache_group_id, kv_cache_group_spec)
+            if isinstance(kv_cache_group_spec.kv_cache_spec,
+                          CrossAttentionSpec):
+                attn_metadata_i = encoder_attn_metadata
+            else:
+                # Prepare for cascade attention if enabled & beneficial.
+                common_prefix_len = 0
+                builder = self.attn_metadata_builders[kv_cache_group_id]
+                if self.cascade_attn_enabled:
+                    common_prefix_len = self._compute_cascade_attn_prefix_len(
+                        num_scheduled_tokens,
+                        scheduler_output.
+                        num_common_prefix_blocks[kv_cache_group_id],
+                        kv_cache_group_spec.kv_cache_spec,
+                        builder,
+                    )
+                attn_metadata_i = (builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
+                ))
 
             for layer_name in kv_cache_group_spec.layer_names:
+                logger.info("Saving attention metadata for layer %s",
+                            layer_name)
                 attn_metadata[layer_name] = attn_metadata_i
 
         attention_cuda_graphs = all(
@@ -861,12 +831,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         cross_attn_spec = self.kv_cache_config.kv_cache_groups[
             cross_attention_group_id].kv_cache_spec
         block_size = cross_attn_spec.block_size
-
-        for i, block_id in enumerate(cross_blocks):
-            block_start_slot = block_id * block_size
-            tokens_in_block = min(block_size, encoder_length - i * block_size)
-            slots.extend(
-                range(block_start_slot, block_start_slot + tokens_in_block))
+        logger.info(
+            "[CROSS ATTN DEBUG] Building cross_slot_mapping from cross_block_table: %s, seq_len: %d, block_size: %d",
+            cross_blocks, encoder_length, block_size)
+        for i in range(0, encoder_length):
+            block_number = cross_blocks[i // block_size]
+            block_offset = i % block_size
+            slot = block_number * block_size + block_offset
+            slots.append(slot)
 
         return slots
 
@@ -1606,6 +1578,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                   finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
+            # Debug logging for empty tensor issue
+            #import logging
+            #logger = logging.getLogger(__name__)
+            #logger.warning(f"[DEBUG] hidden_states shape: {hidden_states.shape}")
+            #logger.warning(f"[DEBUG] logits_indices: {logits_indices}")
+            #logger.warning(f"[DEBUG] sample_hidden_states shape: {sample_hidden_states.shape}")
+            #if sample_hidden_states.numel() == 0:
+            #    logger.error(f"[DEBUG] ERROR: sample_hidden_states is empty!")
             logits = self.model.compute_logits(sample_hidden_states, None)
         if broadcast_pp_output:
             model_output_broadcast_data = {
@@ -2746,6 +2726,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cache size of each layer
         """
         self.kv_cache_config = kv_cache_config
+        logger.info(
+            "[GPU MODEL RUNNER DEBUG] Initializing KV cache with config: %s",
+            kv_cache_config)
         self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
@@ -2804,7 +2787,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         use_mla=use_mla)
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 # Cross-attention between encoder and decoder
-                from vllm.v1.kv_cache_interface import CrossAttentionSpec
                 kv_cache_spec[layer_name] = CrossAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
@@ -2839,7 +2821,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len)
+
+        logger.info("[GPU MDOEL RUNNER DEBUG] KV cache spec: %s",
+                    kv_cache_spec)
         return kv_cache_spec
+
+    def _list_to_long_tensor(
+        self,
+        _list: list[int],
+    ) -> torch.Tensor:
+        return torch.tensor(_list, dtype=torch.long, device=self.device)
 
     def _create_encoder_attention_metadata(
             self, scheduler_output: "SchedulerOutput") -> dict[str, Any]:
@@ -2874,6 +2865,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_seq_start_loc_tensor = async_tensor_h2d(
             encoder_seq_start_loc, torch.int32, self.device, self.pin_memory)
 
+        cross_block_tables = None
+        cross_slot_mapping = None
+        extra_cross_attn_metadata = {}
+        if self.model_config.is_encoder_decoder:
+            # Build cross-attention metadata for encoder-decoder models
+            cross_block_tables = []
+            cross_slot_mapping = []
+            req_ids = self.input_batch.req_ids
+
+            for req_id in req_ids:
+                req_data = None
+                # Find request data in scheduler output
+                for new_req in scheduler_output.scheduled_new_reqs:
+                    if new_req.req_id == req_id:
+                        req_data = new_req
+                        break
+
+                if req_data and req_data.has_encoder_inputs:
+                    # Get cross-attention blocks (group 1)
+                    cross_blocks = req_data.cross_attn_block_ids[
+                        0] if req_data.cross_attn_block_ids else []
+                    cross_block_tables.append(cross_blocks)
+
+                    # Build slot mapping for this request's encoder tokens
+                    cross_slots = self._build_cross_attn_slot_mapping(
+                        cross_blocks,
+                        req_data.encoder_input_length,
+                        cross_attention_group_id=1)
+                    cross_slot_mapping.extend(cross_slots)
+                else:
+                    cross_block_tables.append([])
+
+            extra_cross_attn_metadata = {
+                "cross_block_tables":
+                cross_block_tables,
+                "cross_slot_mapping":
+                self._list_to_long_tensor(cross_slot_mapping),
+            }
+
         encoder_metadata = {
             "encoder_seq_lens": encoder_seq_lens,
             "encoder_seq_lens_tensor": encoder_seq_lens_tensor,
@@ -2900,4 +2930,5 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             common_prefix_len=0,  # No cascade for encoder
             common_attn_metadata=encoder_common_metadata,
             **encoder_metadata,
+            **extra_cross_attn_metadata,
         )

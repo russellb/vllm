@@ -843,6 +843,15 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"[DEBUG] compute_logits - hidden_states shape: {hidden_states.shape}, dtype: {hidden_states.dtype}"
+        )
+        logger.warning(
+            f"[DEBUG] compute_logits - proj_out weight shape: {self.proj_out.weight.shape}, dtype: {self.proj_out.weight.dtype}"
+        )
+
         logits = self.logits_processor(self.proj_out, hidden_states,
                                        sampling_metadata)
         return logits

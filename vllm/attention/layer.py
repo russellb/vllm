@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -22,6 +23,8 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import validate_kv_sharing_target
+
+logger = init_logger(__name__)
 
 
 class Attention(nn.Module):
@@ -446,6 +449,10 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
+    if layer_name == ".decoder.layers.0.layers.encoder_attn.attn":
+        logger.info(
+            f"layer_name: {layer_name}, attn_metadata: {attn_metadata}")
+
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self,

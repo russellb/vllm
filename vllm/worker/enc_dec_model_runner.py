@@ -423,6 +423,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # Prefill phase.
             cross_block_tables = self._empty_int32_tensor().view(
                 len(seq_group_metadata_list), -1)
+            logger.info(
+                "[CROSS ATTN DEBUG] Prefill phase - allocated empty cross_block_tables with shape: %s",
+                cross_block_tables.shape)
 
             # Extract input tokens/positions, cross-attention slot-mapping,
             # & seq len from each sequence group metadata
@@ -449,13 +452,24 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     # slot mapping.
                     # In embeddings, the block tables are {seq_id: None}.
                     cross_slot_mapping.extend([PAD_SLOT_ID] * seq_len)
+                    logger.info(
+                        "[CROSS ATTN DEBUG] Profile run - using PAD_SLOT_ID for cross_slot_mapping, seq_len: %d, PAD_SLOT_ID: %d",
+                        seq_len, PAD_SLOT_ID)
                 else:
+                    logger.info(
+                        "[CROSS ATTN DEBUG] Building cross_slot_mapping from cross_block_table: %s, seq_len: %d, block_size: %d",
+                        seq_group_metadata.cross_block_table, seq_len,
+                        self.block_size)
                     for i in range(0, seq_len):
                         block_number = seq_group_metadata.cross_block_table[
                             i // self.block_size]
                         block_offset = i % self.block_size
                         slot = block_number * self.block_size + block_offset
                         cross_slot_mapping.append(slot)
+                    logger.info(
+                        "[CROSS ATTN DEBUG] Built cross_slot_mapping for seq_group %s: %s",
+                        seq_group_metadata.request_id,
+                        cross_slot_mapping[-seq_len:])
 
                 # Build encoder input tokens
                 encoder_input_tokens.extend(token_ids)
@@ -469,6 +483,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_input_positions)
             cross_slot_mapping_tensor = self._list_to_long_tensor(
                 cross_slot_mapping)
+            logger.info(
+                "[CROSS ATTN DEBUG] Converted to tensors - encoder_input_tokens shape: %s, cross_slot_mapping_tensor: %s",
+                encoder_input_tokens_tensor.shape,
+                cross_slot_mapping_tensor.tolist())
 
         else:
             # Decode phase.
@@ -487,6 +505,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                     cross_block_table = seq_group_metadata.cross_block_table
                     cross_block_tables.append([] if (
                         cross_block_table is None) else cross_block_table)
+                    logger.info(
+                        "[CROSS ATTN DEBUG] Decode phase - added cross_block_table for seq_group %s: %s",
+                        seq_group_metadata.request_id, cross_block_table)
 
             if (model_input.attn_metadata is not None
                     and model_input.attn_metadata.use_cuda_graph):
@@ -516,6 +537,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 dtype=torch.int32,
                 device=self.device,
             )
+            logger.info(
+                "[CROSS ATTN DEBUG] Decode phase - final cross_block_tables tensor shape: %s, content: %s",
+                cross_block_tables.shape, cross_block_tables.tolist())
 
         # Compute encoder sequence lengths & encoder
         # sequence starting offset tensors
@@ -550,6 +574,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             cross_slot_mapping_tensor,
             cross_block_tables,
         )
+
+        logger.info(
+            "[CROSS ATTN DEBUG] Updated attn_metadata - num_encoder_tokens: %d, encoder_seq_lens: %s, max_encoder_seq_len: %d, cross_slot_mapping shape: %s, cross_block_tables shape: %s",
+            attn_metadata.num_encoder_tokens, attn_metadata.encoder_seq_lens,
+            attn_metadata.max_encoder_seq_len,
+            attn_metadata.cross_slot_mapping.shape,
+            attn_metadata.cross_block_tables.shape)
 
         return (attn_metadata, encoder_input_tokens_tensor,
                 encoder_input_positions_tensor)

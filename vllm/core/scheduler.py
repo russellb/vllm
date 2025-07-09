@@ -1585,9 +1585,15 @@ class Scheduler:
                 # Also managed at SequenceGroup level
                 cross_block_table = self.block_manager.get_cross_block_table(
                     seq_group)
+                logger.info(
+                    "[CROSS ATTN DEBUG] Scheduler retrieved cross_block_table for seq_group %s: %s",
+                    seq_group.request_id, cross_block_table)
             else:
                 encoder_seq_data = None
                 cross_block_table = None
+                logger.info(
+                    "[CROSS ATTN DEBUG] Scheduler - seq_group %s is not encoder_decoder, cross_block_table=None",
+                    seq_group.request_id)
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id

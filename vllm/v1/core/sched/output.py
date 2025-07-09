@@ -30,6 +30,7 @@ class NewRequestData:
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
+    cross_attn_block_ids: Optional[tuple[list[int], ...]]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
     has_encoder_inputs: bool
@@ -40,6 +41,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
+        cross_attn_block_ids: Optional[tuple[list[int], ...]] = None,
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -50,6 +52,7 @@ class NewRequestData:
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
+            cross_attn_block_ids=cross_attn_block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             has_encoder_inputs=request.has_encoder_inputs,
@@ -66,6 +69,7 @@ class NewRequestData:
                 f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
+                f"cross_attn_block_ids={self.cross_attn_block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"has_encoder_inputs={self.has_encoder_inputs},"
@@ -82,6 +86,7 @@ class NewRequestData:
                 f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
+                f"cross_attn_block_ids={self.cross_attn_block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
                 f"has_encoder_inputs={self.has_encoder_inputs},"
@@ -101,6 +106,7 @@ class CachedRequestData:
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
     new_block_ids: list[tuple[list[int], ...]]
+    cross_attn_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
 
     @property
@@ -114,6 +120,7 @@ class CachedRequestData:
             resumed_from_preemption=[],
             new_token_ids=[],
             new_block_ids=[],
+            cross_attn_block_ids=[],
             num_computed_tokens=[],
         )
 

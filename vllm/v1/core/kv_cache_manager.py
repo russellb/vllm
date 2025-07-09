@@ -17,6 +17,9 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
+# When cross attention is in use, it's a separate KV cache group.
+_CROSS_ATTN_GROUP_ID = 1
+
 
 @dataclass
 class KVCacheBlocks:
@@ -389,8 +392,7 @@ class KVCacheManager:
                                           num_computed_tokens)
 
     def allocate_cross_attention_blocks(
-            self, request: Request,
-            cross_attention_group_id: int) -> Optional[KVCacheBlocks]:
+            self, request: Request) -> Optional[KVCacheBlocks]:
         """Allocate cross-attention blocks for encoder-decoder models.
         
         Cross-attention blocks are allocated once per request (not per sequence)
@@ -399,7 +401,6 @@ class KVCacheManager:
         
         Args:
             request: The request to allocate cross-attention blocks for.
-            cross_attention_group_id: The KV cache group ID for cross-attention.
             
         Returns:
             The allocated cross-attention blocks, or None if allocation failed.
@@ -412,7 +413,7 @@ class KVCacheManager:
 
         # Get the cross-attention KV cache spec
         cross_attn_spec = self.kv_cache_config.kv_cache_groups[
-            cross_attention_group_id].kv_cache_spec
+            _CROSS_ATTN_GROUP_ID].kv_cache_spec
         cross_attn_block_size = cross_attn_spec.block_size
 
         # Calculate number of blocks needed for encoder tokens
@@ -432,15 +433,10 @@ class KVCacheManager:
                 self.block_pool.free_blocks(cross_attention_blocks)
             return None
 
-        # Create KVCacheBlocks with cross-attention blocks in the right group
-        blocks_per_group = []
-        for i in range(self.num_kv_cache_groups):
-            if i == cross_attention_group_id:
-                blocks_per_group.append(cross_attention_blocks)
-            else:
-                blocks_per_group.append([])
+        # TODO: we are leaking these blocks.
 
-        return KVCacheBlocks(tuple(blocks_per_group))
+        blocks = tuple((cross_attention_blocks, ))
+        return KVCacheBlocks(blocks)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""

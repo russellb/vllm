@@ -12,8 +12,11 @@ from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
+from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+
+logger = init_logger(__name__)
 
 SeqId = int
 EncoderSeqId = str
@@ -152,6 +155,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
+        logger.info(
+            "[CROSS ATTN DEBUG] Created BlockTable for seq_id %s, block_size: %d",
+            seq.seq_id, self.block_size)
+
         if seq.get_token_ids():
             # NOTE: If there are any factors affecting the block besides
             # token_ids, they should be added as input to extra_hash.
@@ -160,6 +167,14 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(token_ids=seq.get_token_ids(),
                                  extra_hash=extra_hash)
+            logger.info(
+                "[CROSS ATTN DEBUG] Allocated blocks for seq_id %s, token_ids: %s, physical_block_ids: %s",
+                seq.seq_id, seq.get_token_ids(),
+                block_table.physical_block_ids)
+        else:
+            logger.info(
+                "[CROSS ATTN DEBUG] No tokens to allocate for seq_id %s",
+                seq.seq_id)
 
         return block_table
 
@@ -175,6 +190,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         seq = waiting_seqs[0]
         block_table: BlockTable = self._allocate_sequence(seq)
         self.block_tables[seq.seq_id] = block_table
+        logger.info(
+            "[CROSS ATTN DEBUG] Stored decoder block_table for seq_id %s in block_tables",
+            seq.seq_id)
 
         # Track seq
         self._last_access_blocks_tracker.add_seq(seq.seq_id)
@@ -203,6 +221,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             assert encoder_seq is not None
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
+            logger.info(
+                "[CROSS ATTN DEBUG] Allocated cross_block_table for request_id %s, encoder_seq tokens: %s, physical_block_ids: %s",
+                request_id, encoder_seq.get_token_ids(),
+                block_table.physical_block_ids)
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -278,7 +300,14 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         request_id = seq_group.request_id
         if request_id not in self.cross_block_tables:
             # Already freed or hasn't been scheduled yet.
+            logger.info(
+                "[CROSS ATTN DEBUG] Cannot free cross_block_table for request_id %s - not found",
+                request_id)
             return
+        block_ids = self.cross_block_tables[request_id].physical_block_ids
+        logger.info(
+            "[CROSS ATTN DEBUG] Freeing cross_block_table for request_id %s, block_ids: %s",
+            request_id, block_ids)
         self.cross_block_tables[request_id].free()
         del self.cross_block_tables[request_id]
 
@@ -291,6 +320,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         assert request_id in self.cross_block_tables
         block_ids = self.cross_block_tables[request_id].physical_block_ids
         assert all(b is not None for b in block_ids)
+        logger.info(
+            "[CROSS ATTN DEBUG] Retrieved cross_block_table for request_id %s: %s",
+            request_id, block_ids)
         return block_ids  # type: ignore
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):

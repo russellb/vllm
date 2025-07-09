@@ -21,6 +21,10 @@ from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
@@ -43,6 +47,9 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        logger.info(
+            f"[DEBUG] UnquantizedEmbeddingMethod.apply: x.shape={x.shape}, layer.weight.shape={layer.weight.shape}, bias.shape={bias.shape if bias is not None else None}"
+        )
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module,

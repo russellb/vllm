@@ -688,7 +688,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     Returns:
         The generated KVCacheConfig
     """
-
+    logger.info("[KV CACHE UTILS DEBUG] Using uniform KV cache spec: %s",
+                kv_cache_spec)
     page_size = get_uniform_page_size(kv_cache_spec)
     num_blocks = get_num_blocks(vllm_config, len(kv_cache_spec),
                                 available_memory, page_size)
@@ -710,6 +711,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
                                                     grouped_layer_names),
     )
+
+    logger.info("KV cache config: %s", kv_cache_config)
 
     num_tokens = num_blocks * vllm_config.cache_config.block_size
     num_tokens_str = f"{num_tokens:,}"
@@ -938,6 +941,8 @@ def get_kv_cache_config(
     Returns:
         The generated KVCacheConfigs
     """
+    logger.info("[KV CACHE UTILS DEBUG] get_kv_cache_config()")
+
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
 
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:

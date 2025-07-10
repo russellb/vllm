@@ -6,7 +6,7 @@ from typing import Callable, Optional
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    FullAttentionManager, get_manager_for_kv_cache_spec)
+    CrossAttentionManager, FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.request import Request
 
@@ -43,9 +43,12 @@ class KVCacheCoordinator(ABC):
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
 
-    def get_num_blocks_to_allocate(
-            self, request_id: str, num_tokens: int,
-            new_computed_blocks: tuple[list[KVCacheBlock], ...]) -> int:
+    def get_num_blocks_to_allocate(self,
+                                   request_id: str,
+                                   num_tokens: int,
+                                   new_computed_blocks: tuple[
+                                       list[KVCacheBlock], ...],
+                                   cross_attn: bool = False) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -61,8 +64,14 @@ class KVCacheCoordinator(ABC):
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
-            num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                request_id, num_tokens, new_computed_blocks[i])
+            if cross_attn and isinstance(manager, CrossAttentionManager):
+                # For cross-attention, we issue a single static allocation
+                # of blocks based on the number of encoder input tokens.
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                    request_id, num_tokens, [])
+            elif not cross_attn:
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                    request_id, num_tokens, new_computed_blocks[i])
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(

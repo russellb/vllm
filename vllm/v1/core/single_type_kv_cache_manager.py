@@ -434,6 +434,25 @@ class MambaManager(SingleTypeKVCacheManager):
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
+    def save_new_computed_blocks(
+            self, request_id: str,
+            new_computed_blocks: list[KVCacheBlock]) -> None:
+        # We do not allocate blocks as decoder tokens are generated, so this
+        # method is not relevant.
+        pass
+
+    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
+                     num_tokens: int) -> None:
+        # We do not cache blocks for cross-attention to be shared between
+        # requests, so this method is not relevant.
+        pass
+
+    def get_num_common_prefix_blocks(self, request_id: str,
+                                     num_running_requests: int) -> int:
+        # Cross-attention blocks contain request-specific encoder states
+        # and are not shared between different requests
+        return 0
+
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -460,12 +479,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # Cross-attention blocks represent encoder states which are needed
         # for the entire decoding process, so no blocks should be skipped
         pass
-
-    def get_num_common_prefix_blocks(self, request_id: str,
-                                     num_running_requests: int) -> int:
-        # Cross-attention blocks contain request-specific encoder states
-        # and are not shared between different requests
-        return 0
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {

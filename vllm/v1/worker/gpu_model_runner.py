@@ -149,6 +149,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
+        if self.model_config.is_encoder_decoder:
+            # If specified in the model config, this attribute defines the
+            # maximum length of the encoder input.
+            self.max_encoder_len = getattr(self.model_config.hf_config,
+                                           'max_source_positions', 0)
+        else:
+            self.max_encoder_len = 0
 
         # Sampler
         self.sampler = Sampler()
@@ -207,7 +214,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the block_sizes in the kv cache config.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
+            # We need to use the encoder length for encoder-decoer
+            # because of KV cache for cross-attention.
+            # TODO(russellb): Is this correct?
+            max_model_len=max(self.max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -2517,7 +2527,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "for more details.")
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
-                max_model_len=self.max_model_len,
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=self.pin_memory,

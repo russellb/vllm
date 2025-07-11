@@ -89,8 +89,11 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id,
                                              new_computed_blocks[i])
 
-    def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> tuple[list[KVCacheBlock], ...]:
+    def allocate_new_blocks(
+            self,
+            request_id: str,
+            num_tokens: int,
+            cross_attn: bool = False) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -104,7 +107,8 @@ class KVCacheCoordinator(ABC):
             The new allocated blocks.
         """
         return tuple(
-            manager.allocate_new_blocks(request_id, num_tokens)
+            (manager.allocate_new_blocks(request_id, num_tokens) if isinstance(
+                manager, CrossAttentionManager) == cross_attn else [])
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHash],

@@ -187,8 +187,6 @@ class MambaSpec(KVCacheSpec):
 class CrossAttentionSpec(AttentionSpec):
     """
     KV cache spec for cross-attention layers in encoder-decoder models.
-    Cross-attention caches encoder states that are shared across decoder
-    sequences.
     """
 
     @property

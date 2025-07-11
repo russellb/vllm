@@ -328,8 +328,9 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_encoder_tokens)
+        new_blocks = self.coordinator.allocate_new_blocks(request.request_id,
+                                                          num_encoder_tokens,
+                                                          cross_attn=True)
 
         return KVCacheBlocks(new_blocks)
 

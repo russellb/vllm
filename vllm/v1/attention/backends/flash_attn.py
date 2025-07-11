@@ -144,11 +144,6 @@ class FlashAttentionMetadata:
     # Number of tokens input to encoder
     num_encoder_tokens: Optional[int] = None
 
-    # Cross-attention memory-mapping data structures: slot mapping
-    # and block tables
-    cross_slot_mapping: Optional[torch.Tensor] = None
-    cross_block_tables: Optional[torch.Tensor] = None
-
     # for local attention
     @dataclass
     class LocalAttentionMetadata:
@@ -184,17 +179,6 @@ class FlashAttentionMetadata:
                 self.encoder_seq_lens_tensor, self.encoder_seq_start_loc,
                 self.max_encoder_seq_len, self.num_encoder_tokens)
         return res
-
-    @property
-    def is_all_cross_attn_metadata_set(self) -> bool:
-        """
-        All attention metadata required for enc/dec cross-attention is set.
-        
-        Superset of encoder attention required metadata.
-        """
-        return (self.is_all_encoder_attn_metadata_set
-                and self.cross_slot_mapping is not None
-                and self.cross_block_tables is not None)
 
 
 def _get_sliding_window_configs(
@@ -270,9 +254,7 @@ class FlashAttentionMetadataBuilder(
             encoder_seq_lens_tensor: Optional[torch.Tensor] = None,
             encoder_seq_start_loc: Optional[torch.Tensor] = None,
             max_encoder_seq_len: Optional[int] = None,
-            num_encoder_tokens: Optional[int] = None,
-            cross_slot_mapping: Optional[torch.Tensor] = None,
-            cross_block_tables: Optional[torch.Tensor] = None):
+            num_encoder_tokens: Optional[int] = None):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -443,8 +425,6 @@ class FlashAttentionMetadataBuilder(
             encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
             num_encoder_tokens=num_encoder_tokens,
-            cross_slot_mapping=cross_slot_mapping,
-            cross_block_tables=cross_block_tables,
         )
         return attn_metadata
 
@@ -572,15 +552,11 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Validate attention metadata based on attention type
         attn_type = self.attn_type
-        if (attn_type == AttentionType.ENCODER
+        if (attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_DECODER,
+                          AttentionType.ENCODER_ONLY)
                 and (not attn_metadata.is_all_encoder_attn_metadata_set)):
             raise AttributeError("Encoder attention requires setting "
                                  "encoder metadata attributes.")
-        elif (attn_type == AttentionType.ENCODER_DECODER
-              and (not attn_metadata.is_all_cross_attn_metadata_set)):
-            raise AttributeError("Encoder/decoder cross-attention "
-                                 "requires setting cross-attention "
-                                 "metadata attributes.")
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -623,10 +599,7 @@ class FlashAttentionImpl(AttentionImpl):
             #     cross-attention computation in the decoding phase, where the
             #     KV cache is already populated with the cross-attention
             #     tensor. Thus, we skip cache updates during this time.
-            if attn_type == AttentionType.ENCODER_DECODER:
-                updated_slot_mapping = attn_metadata.cross_slot_mapping
-            else:
-                updated_slot_mapping = attn_metadata.slot_mapping
+            updated_slot_mapping = attn_metadata.slot_mapping
 
             reshape_and_cache_flash(
                 key,

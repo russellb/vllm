@@ -722,16 +722,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
-        if (self.model_config.is_encoder_decoder
-                and hasattr(scheduler_output, 'scheduled_encoder_inputs')
-                and scheduler_output.scheduled_encoder_inputs):
-            encoder_attn_metadata = self._create_encoder_attention_metadata(
+        encoder_attn_metadata: dict[str, Any] = {}
+        if self.model_config.is_encoder_decoder:
+            encoder_attn_metadata = self._build_encoder_attention_metadata(
                 scheduler_output)
 
             # Add encoder attention metadata for all encoder layers
-            from vllm.attention import AttentionType
-            from vllm.attention.layer import Attention
-            from vllm.config import get_layers_from_vllm_config
             attention_layers = get_layers_from_vllm_config(
                 self.vllm_config, Attention)
             for layer_name, attn_module in attention_layers.items():
@@ -742,6 +738,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            is_enc_dec = isinstance(kv_cache_group_spec.kv_cache_spec,
+                                    CrossAttentionSpec)
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
@@ -755,10 +753,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     builder,
                 )
 
-            attn_metadata_i = (builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-            ))
+            attn_metadata_i = (encoder_attn_metadata
+                               if is_enc_dec else builder.build(
+                                   common_prefix_len=common_prefix_len,
+                                   common_attn_metadata=common_attn_metadata,
+                               ))
 
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -2869,7 +2868,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return attn_page_size
 
-    def _create_encoder_attention_metadata(
+    def _build_encoder_attention_metadata(
             self, scheduler_output: "SchedulerOutput") -> dict[str, Any]:
         """Prepare encoder attention metadata for encoder-decoder models."""
         from vllm.utils import async_tensor_h2d
@@ -2881,9 +2880,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_seq_lens = []
         num_encoder_tokens = 0
 
-        for encoder_input in scheduled_encoder_inputs:
+        for _ in scheduled_encoder_inputs:
             # For Whisper, encoder sequence length
             # is determined by max_source_positions
+            # TODO(russellb): Generalize this to not assume whisper behavior
             encoder_seq_len = self.model_config.hf_config.max_source_positions
             encoder_seq_lens.append(encoder_seq_len)
             num_encoder_tokens += encoder_seq_len

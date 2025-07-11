@@ -17,6 +17,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
@@ -724,7 +725,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # (encoder layers are not in KV cache groups)
         encoder_attn_metadata: dict[str, Any] = {}
         if self.model_config.is_encoder_decoder:
-            encoder_attn_metadata = self._build_encoder_attention_metadata(
+            encoder_attn_metadata = self._build_encoder_attn_metadata(
                 scheduler_output)
 
             # Add encoder attention metadata for all encoder layers
@@ -2868,7 +2869,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return attn_page_size
 
-    def _build_encoder_attention_metadata(
+    def _build_encoder_attn_metadata(
             self, scheduler_output: "SchedulerOutput") -> dict[str, Any]:
         """Prepare encoder attention metadata for encoder-decoder models."""
         from vllm.utils import async_tensor_h2d
@@ -2876,17 +2877,50 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get encoder input information from scheduled encoder inputs
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
 
-        # Calculate encoder sequence lengths
+        # Calculate encoder sequence lengths and cross slot mappings
         encoder_seq_lens = []
+        cross_slot_mapping = []
         num_encoder_tokens = 0
 
-        for _ in scheduled_encoder_inputs:
+        for req_id in scheduled_encoder_inputs:
             # For Whisper, encoder sequence length
             # is determined by max_source_positions
             # TODO(russellb): Generalize this to not assume whisper behavior
             encoder_seq_len = self.model_config.hf_config.max_source_positions
             encoder_seq_lens.append(encoder_seq_len)
             num_encoder_tokens += encoder_seq_len
+
+            if self.model_config.is_encoder_decoder:
+                # Build cross slot mapping for this request
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    # During memory profiling or if request not found,
+                    # use dummy slot mapping
+                    cross_slot_mapping.extend([PAD_SLOT_ID] * encoder_seq_len)
+                else:
+                    # Find the KV cache group that uses CrossAttentionSpec
+                    cross_attn_group_idx = None
+                    for i, kv_cache_group in enumerate(
+                            self.kv_cache_config.kv_cache_groups):
+                        if isinstance(kv_cache_group.kv_cache_spec,
+                                      CrossAttentionSpec):
+                            cross_attn_group_idx = i
+                            break
+
+                    if ((cross_attn_group_idx is not None) and
+                        (cross_attn_group_idx < len(req_state.block_ids))):
+                        # Get cross attention block IDs for this request
+                        cross_block_ids = req_state.block_ids[
+                            cross_attn_group_idx]
+                        block_size = self.kv_cache_config.kv_cache_groups[
+                            cross_attn_group_idx].kv_cache_spec.block_size
+
+                        # Calculate slot mapping from block IDs
+                        for i in range(encoder_seq_len):
+                            block_number = cross_block_ids[i // block_size]
+                            block_offset = i % block_size
+                            slot = block_number * block_size + block_offset
+                            cross_slot_mapping.append(slot)
 
         # Create encoder sequence start locations (cumulative sum)
         encoder_seq_start_loc = [0]
@@ -2901,6 +2935,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                    self.pin_memory)
         encoder_seq_start_loc_tensor = async_tensor_h2d(
             encoder_seq_start_loc, torch.int32, self.device, self.pin_memory)
+        cross_slot_mapping_tensor = async_tensor_h2d(cross_slot_mapping,
+                                                     torch.int64, self.device,
+                                                     self.pin_memory)
 
         encoder_metadata = {
             "encoder_seq_lens": encoder_seq_lens,
@@ -2908,6 +2945,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
             "max_encoder_seq_len": max_encoder_seq_len,
             "num_encoder_tokens": num_encoder_tokens,
+            "cross_slot_mapping": cross_slot_mapping_tensor,
         }
 
         # Use the first attention metadata builder

@@ -143,6 +143,7 @@ class FlashAttentionMetadata:
     max_encoder_seq_len: Optional[int] = None
     # Number of tokens input to encoder
     num_encoder_tokens: Optional[int] = None
+    cross_slot_mapping: Optional[torch.Tensor] = None
 
     # for local attention
     @dataclass
@@ -254,7 +255,8 @@ class FlashAttentionMetadataBuilder(
             encoder_seq_lens_tensor: Optional[torch.Tensor] = None,
             encoder_seq_start_loc: Optional[torch.Tensor] = None,
             max_encoder_seq_len: Optional[int] = None,
-            num_encoder_tokens: Optional[int] = None):
+            num_encoder_tokens: Optional[int] = None,
+            cross_slot_mapping: Optional[torch.Tensor] = None):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -425,6 +427,7 @@ class FlashAttentionMetadataBuilder(
             encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
             num_encoder_tokens=num_encoder_tokens,
+            cross_slot_mapping=cross_slot_mapping,
         )
         return attn_metadata
 
@@ -599,7 +602,10 @@ class FlashAttentionImpl(AttentionImpl):
             #     cross-attention computation in the decoding phase, where the
             #     KV cache is already populated with the cross-attention
             #     tensor. Thus, we skip cache updates during this time.
-            updated_slot_mapping = attn_metadata.slot_mapping
+            if attn_type == AttentionType.ENCODER_DECODER:
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                updated_slot_mapping = attn_metadata.slot_mapping
 
             reshape_and_cache_flash(
                 key,

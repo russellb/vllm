@@ -720,10 +720,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         attn_metadata: dict[str, Any] = {}
+        encoder_attn_metadata: dict[str, Any] = {}
 
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
-        encoder_attn_metadata: dict[str, Any] = {}
         if self.model_config.is_encoder_decoder:
             encoder_attn_metadata = self._build_encoder_attn_metadata(
                 scheduler_output)
@@ -741,6 +741,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config.kv_cache_groups):
             is_enc_dec = isinstance(kv_cache_group_spec.kv_cache_spec,
                                     CrossAttentionSpec)
+            if is_enc_dec:
+                encoder_attn_metadata = self._build_encoder_attn_metadata(
+                    scheduler_output, query_start_loc)
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
@@ -2870,8 +2873,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return attn_page_size
 
     def _build_encoder_attn_metadata(
-            self, scheduler_output: "SchedulerOutput") -> dict[str, Any]:
-        """Prepare encoder attention metadata for encoder-decoder models."""
+            self,
+            scheduler_output: "SchedulerOutput",
+            query_start_loc: Optional[torch.Tensor] = None) -> dict[str, Any]:
+        """Prepare encoder attention metadata for encoder-decoder models.
+
+        Args:
+            scheduler_output: Scheduler output
+            query_start_loc: Query start location tensor. Passed in for
+              cross-attention, as this will reflect the decode query.
+
+        Returns:
+            dict[str, Any]: Encoder attention metadata
+        """
         from vllm.utils import async_tensor_h2d
 
         # Get encoder input information from scheduled encoder inputs
@@ -2954,7 +2968,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Create encoder-specific common attention metadata
         encoder_common_metadata = CommonAttentionMetadata(
-            query_start_loc=encoder_metadata["encoder_seq_start_loc"],
+            query_start_loc=(query_start_loc if query_start_loc is not None
+                             else encoder_metadata["encoder_seq_start_loc"]),
             seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
             num_reqs=len(encoder_metadata["encoder_seq_lens"]),
             num_actual_tokens=encoder_metadata["num_encoder_tokens"],

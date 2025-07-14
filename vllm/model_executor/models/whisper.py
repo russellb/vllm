@@ -583,12 +583,7 @@ class WhisperModel(nn.Module):
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        logger.info(
-            "[WHISPER DEBUG] WhisperModel.forward() -> "
-            "input_features: %s -- input_ids: %s -- positions: %s",
-            input_features, input_ids, positions)
         encoder_outputs = self.get_encoder_outputs(input_features)
-        logger.info("[WHISPER DEBUG] Encoder outputs: %s", encoder_outputs)
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,

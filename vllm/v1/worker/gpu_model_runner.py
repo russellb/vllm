@@ -724,7 +724,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
-        if self.model_config.is_encoder_decoder:
+        # This is only necessary when there are encoder inputs
+        # to process. Otherwise, encoder attention won't run.
+        if (self.model_config.is_encoder_decoder
+                and scheduler_output.scheduled_encoder_inputs):
             encoder_attn_metadata = self._build_encoder_attn_metadata(
                 scheduler_output)
 
@@ -743,7 +746,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                     CrossAttentionSpec)
             if is_enc_dec:
                 encoder_attn_metadata = self._build_encoder_attn_metadata(
-                    scheduler_output, query_start_loc)
+                    scheduler_output, common_attn_metadata)
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
@@ -2873,9 +2876,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return attn_page_size
 
     def _build_encoder_attn_metadata(
-            self,
-            scheduler_output: "SchedulerOutput",
-            query_start_loc: Optional[torch.Tensor] = None) -> dict[str, Any]:
+        self,
+        scheduler_output: "SchedulerOutput",
+        common_attn_metadata: Optional[CommonAttentionMetadata] = None
+    ) -> dict[str, Any]:
         """Prepare encoder attention metadata for encoder-decoder models.
 
         Args:
@@ -2967,9 +2971,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         builder = self.attn_metadata_builders[0]
 
         # Create encoder-specific common attention metadata
-        encoder_common_metadata = CommonAttentionMetadata(
-            query_start_loc=(query_start_loc if query_start_loc is not None
-                             else encoder_metadata["encoder_seq_start_loc"]),
+        # If we're building metadata for cross-attention, we use the
+        # common_attn_metadata built from decoder details and it gets
+        # passed in here.
+        common_metadata = common_attn_metadata or CommonAttentionMetadata(
+            query_start_loc=encoder_metadata["encoder_seq_start_loc"],
             seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
             num_reqs=len(encoder_metadata["encoder_seq_lens"]),
             num_actual_tokens=encoder_metadata["num_encoder_tokens"],
@@ -2979,6 +2985,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Build encoder attention metadata using the builder
         return builder.build(
             common_prefix_len=0,  # No cascade for encoder
-            common_attn_metadata=encoder_common_metadata,
+            common_attn_metadata=common_metadata,
             **encoder_metadata,
         )

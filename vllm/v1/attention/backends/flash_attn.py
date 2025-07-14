@@ -650,7 +650,7 @@ class FlashAttentionImpl(AttentionImpl):
                 block_table = attn_metadata.block_table
                 scheduler_metadata = attn_metadata.scheduler_metadata
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
+            descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
@@ -725,7 +725,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         descale_shape = (
             cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
-            key.shape[1])
+            self.num_kv_heads)
 
         # Call flash attention directly on Q, K, V tensors
         flash_attn_varlen_func(

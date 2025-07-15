@@ -2974,14 +2974,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # If we're building metadata for cross-attention, we use the
         # common_attn_metadata built from decoder details and it gets
         # passed in here.
-        common_metadata = common_attn_metadata or CommonAttentionMetadata(
-            query_start_loc=encoder_metadata["encoder_seq_start_loc"],
-            seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
-            num_reqs=len(encoder_metadata["encoder_seq_lens"]),
-            num_actual_tokens=encoder_metadata["num_encoder_tokens"],
-            max_query_len=encoder_metadata["max_encoder_seq_len"],
-        )
-
+        if common_attn_metadata is None:
+            # ENCODER self-attention
+            common_metadata = CommonAttentionMetadata(
+                query_start_loc=encoder_metadata["encoder_seq_start_loc"],
+                seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
+                num_reqs=len(encoder_metadata["encoder_seq_lens"]),
+                num_actual_tokens=encoder_metadata["num_encoder_tokens"],
+                max_query_len=encoder_metadata["max_encoder_seq_len"],
+            )
+        else:
+            # ENCODER_DECODER cross-attention
+            common_metadata = CommonAttentionMetadata(
+                query_start_loc=common_attn_metadata.query_start_loc,
+                seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
+                num_reqs=common_attn_metadata.num_reqs,
+                num_actual_tokens=common_attn_metadata.num_actual_tokens,
+                max_query_len=common_attn_metadata.max_query_len,
+            )
         # Build encoder attention metadata using the builder
         return builder.build(
             common_prefix_len=0,  # No cascade for encoder

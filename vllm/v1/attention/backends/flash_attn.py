@@ -261,9 +261,16 @@ class FlashAttentionMetadataBuilder(
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        if encoder_seq_lens_tensor is not None:
+            # TODO fix this hack
+            max_seq_len = 1500
+            seq_lens = torch.tensor([1500],
+                                    dtype=torch.int32,
+                                    device=self.runner.device)
+        else:
+            max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+            seq_lens = common_attn_metadata.seq_lens
         query_start_loc = common_attn_metadata.query_start_loc
-        seq_lens = common_attn_metadata.seq_lens
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
 

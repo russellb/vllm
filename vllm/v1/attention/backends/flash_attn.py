@@ -551,15 +551,6 @@ class FlashAttentionImpl(AttentionImpl):
             # Profiling run.
             return output
 
-        import os
-        if os.environ.get("FLASH_ATTN_DEBUG", "0") == "1":
-            # log all inputs
-            logger.info(
-                "[FLASH_ATTN DEBUG V1] "
-                "query: %s, key: %s, value: %s, kv_cache: %s, "
-                "attn_metadata: %s", query, key, value, kv_cache,
-                attn_metadata)
-
         # Validate attention metadata based on attention type
         attn_type = self.attn_type
         if (attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_DECODER,

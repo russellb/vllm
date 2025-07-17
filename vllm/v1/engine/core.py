@@ -775,19 +775,8 @@ class EngineCoreProc(EngineCore):
                     linger=4000)) if coord_output_path is not None else None
             max_reuse_bufs = len(sockets) + 1
 
-            from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(
-                "openai/whisper-large-v3")
-
             while True:
                 output = self.output_queue.get()
-                if isinstance(output[1], EngineCoreOutputs):
-                    ecos = output[1].outputs
-                    for eco in ecos:
-                        print(f"eco.new_token_ids: {eco.new_token_ids}")
-                        print("eco.new_token_ids decoded: "
-                              f"{tokenizer.decode(eco.new_token_ids)}")
-
                 if output == EngineCoreProc.ENGINE_CORE_DEAD:
                     for socket in sockets:
                         socket.send(output)

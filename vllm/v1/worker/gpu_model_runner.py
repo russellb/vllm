@@ -2948,7 +2948,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         encoder_metadata = {
             "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
             "max_encoder_seq_len": self.max_encoder_len,
-            "num_encoder_tokens": num_encoder_tokens,
         }
 
         # Use the first attention metadata builder
@@ -2965,7 +2964,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 query_start_loc=encoder_metadata["encoder_seq_start_loc"],
                 seq_lens=encoder_seq_lens_tensor,
                 num_reqs=len(encoder_seq_lens),
-                num_actual_tokens=encoder_metadata["num_encoder_tokens"],
+                num_actual_tokens=num_encoder_tokens,
                 max_query_len=encoder_metadata["max_encoder_seq_len"],
             )
         else:

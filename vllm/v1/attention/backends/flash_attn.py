@@ -138,8 +138,6 @@ class FlashAttentionMetadata:
     encoder_seq_start_loc: Optional[torch.Tensor] = None
     # Maximum sequence length among encoder sequences
     max_encoder_seq_len: Optional[int] = None
-    # Number of tokens input to encoder
-    num_encoder_tokens: Optional[int] = None
     cross_slot_mapping: Optional[torch.Tensor] = None
 
     # for local attention
@@ -159,19 +157,8 @@ class FlashAttentionMetadata:
         """
         All attention metadata required for encoder attention is set.
         """
-        res = (self.encoder_seq_start_loc is not None
-               and self.max_encoder_seq_len is not None
-               and self.num_encoder_tokens is not None)
-        if not res:
-            # rewrite without using f-string
-            logger.info(
-                "[FLASH_ATTN DEBUG] "
-                "Encoder attention metadata is not fully set. "
-                "encoder_seq_start_loc: %s, "
-                "max_encoder_seq_len: %s, "
-                "num_encoder_tokens: %s", self.encoder_seq_start_loc,
-                self.max_encoder_seq_len, self.num_encoder_tokens)
-        return res
+        return (self.encoder_seq_start_loc is not None
+                and self.max_encoder_seq_len is not None)
 
 
 def _get_sliding_window_configs(
@@ -245,7 +232,6 @@ class FlashAttentionMetadataBuilder(
             # Encoder/cross-attention metadata (optional)
             encoder_seq_start_loc: Optional[torch.Tensor] = None,
             max_encoder_seq_len: Optional[int] = None,
-            num_encoder_tokens: Optional[int] = None,
             cross_slot_mapping: Optional[torch.Tensor] = None):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -418,7 +404,6 @@ class FlashAttentionMetadataBuilder(
             # Encoder/cross-attention fields
             encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
-            num_encoder_tokens=num_encoder_tokens,
             cross_slot_mapping=cross_slot_mapping,
         )
         return attn_metadata

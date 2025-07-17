@@ -562,13 +562,6 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            # We skip updating the KV cache under two conditions:
-            #  a. When the Attention Type is ENCODER. In this phase, we compute
-            #     only the encoder attention without updating the cache.
-            #  b. When both Key and Value are None. This occurs during
-            #     cross-attention computation in the decoding phase, where the
-            #     KV cache is already populated with the cross-attention
-            #     tensor. Thus, we skip cache updates during this time.
             if attn_type == AttentionType.ENCODER_DECODER:
                 updated_slot_mapping = attn_metadata.cross_slot_mapping
             else:

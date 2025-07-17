@@ -2884,14 +2884,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         Args:
             scheduler_output: Scheduler output
-            query_start_loc: Query start location tensor. Passed in for
-              cross-attention, as this will reflect the decode query.
 
         Returns:
             dict[str, Any]: Encoder attention metadata
         """
-        from vllm.utils import async_tensor_h2d
-
         # Get encoder input information from scheduled encoder inputs
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
 
@@ -2901,10 +2897,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_encoder_tokens = 0
 
         for req_id in scheduled_encoder_inputs:
-            # For Whisper, encoder sequence length
-            # is determined by max_source_positions
-            # TODO(russellb): Generalize this to not assume whisper behavior
-            encoder_seq_len = self.model_config.hf_config.max_source_positions
+            encoder_seq_len = self.max_encoder_len
             encoder_seq_lens.append(encoder_seq_len)
             num_encoder_tokens += encoder_seq_len
 
@@ -2945,8 +2938,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for seq_len in encoder_seq_lens:
             encoder_seq_start_loc.append(encoder_seq_start_loc[-1] + seq_len)
 
-        max_encoder_seq_len = max(encoder_seq_lens) if encoder_seq_lens else 0
-
         # Convert to tensors
         encoder_seq_lens_tensor = async_tensor_h2d(encoder_seq_lens, torch.int,
                                                    self.device,
@@ -2961,7 +2952,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "encoder_seq_lens": encoder_seq_lens,
             "encoder_seq_lens_tensor": encoder_seq_lens_tensor,
             "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
-            "max_encoder_seq_len": max_encoder_seq_len,
+            "max_encoder_seq_len": self.max_encoder_len,
             "num_encoder_tokens": num_encoder_tokens,
             "cross_slot_mapping": cross_slot_mapping_tensor,
         }

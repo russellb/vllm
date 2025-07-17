@@ -133,7 +133,6 @@ class FlashAttentionMetadata:
     # Begin encoder attn & enc/dec cross-attn fields...
 
     # Encoder sequence lengths representation
-    encoder_seq_lens: Optional[list[int]] = None
     encoder_seq_lens_tensor: Optional[torch.Tensor] = None
     # (batch_size + 1,). The cumulative sequence lengths of the encoder
     # sequences in the batch, used to index into sequence. E.g., if the sequence
@@ -162,8 +161,7 @@ class FlashAttentionMetadata:
         """
         All attention metadata required for encoder attention is set.
         """
-        res = (self.encoder_seq_lens is not None
-               and self.encoder_seq_lens_tensor is not None
+        res = (self.encoder_seq_lens_tensor is not None
                and self.encoder_seq_start_loc is not None
                and self.max_encoder_seq_len is not None
                and self.num_encoder_tokens is not None)
@@ -172,13 +170,12 @@ class FlashAttentionMetadata:
             logger.info(
                 "[FLASH_ATTN DEBUG] "
                 "Encoder attention metadata is not fully set. "
-                "encoder_seq_lens: %s, "
                 "encoder_seq_lens_tensor: %s, "
                 "encoder_seq_start_loc: %s, "
                 "max_encoder_seq_len: %s, "
-                "num_encoder_tokens: %s", self.encoder_seq_lens,
-                self.encoder_seq_lens_tensor, self.encoder_seq_start_loc,
-                self.max_encoder_seq_len, self.num_encoder_tokens)
+                "num_encoder_tokens: %s", self.encoder_seq_lens_tensor,
+                self.encoder_seq_start_loc, self.max_encoder_seq_len,
+                self.num_encoder_tokens)
         return res
 
 
@@ -251,7 +248,6 @@ class FlashAttentionMetadataBuilder(
             common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             # Encoder/cross-attention metadata (optional)
-            encoder_seq_lens: Optional[list[int]] = None,
             encoder_seq_lens_tensor: Optional[torch.Tensor] = None,
             encoder_seq_start_loc: Optional[torch.Tensor] = None,
             max_encoder_seq_len: Optional[int] = None,
@@ -261,15 +257,12 @@ class FlashAttentionMetadataBuilder(
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        if encoder_seq_lens_tensor is not None:
-            # TODO fix this hack
-            max_seq_len = 1500
-            seq_lens = torch.tensor([1500],
-                                    dtype=torch.int32,
-                                    device=self.runner.device)
+        if cross_slot_mapping is not None and max_encoder_seq_len is not None:
+            # ENCODER_DECODER cross-attention
+            max_seq_len = max_encoder_seq_len
         else:
             max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
-            seq_lens = common_attn_metadata.seq_lens
+        seq_lens = common_attn_metadata.seq_lens
         query_start_loc = common_attn_metadata.query_start_loc
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
@@ -429,7 +422,6 @@ class FlashAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             # Encoder/cross-attention fields
-            encoder_seq_lens=encoder_seq_lens,
             encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,

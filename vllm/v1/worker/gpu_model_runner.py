@@ -2944,17 +2944,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                    self.pin_memory)
         encoder_seq_start_loc_tensor = async_tensor_h2d(
             encoder_seq_start_loc, torch.int32, self.device, self.pin_memory)
-        cross_slot_mapping_tensor = async_tensor_h2d(cross_slot_mapping,
-                                                     torch.int64, self.device,
-                                                     self.pin_memory)
 
         encoder_metadata = {
-            "encoder_seq_lens": encoder_seq_lens,
             "encoder_seq_lens_tensor": encoder_seq_lens_tensor,
             "encoder_seq_start_loc": encoder_seq_start_loc_tensor,
             "max_encoder_seq_len": self.max_encoder_len,
             "num_encoder_tokens": num_encoder_tokens,
-            "cross_slot_mapping": cross_slot_mapping_tensor,
         }
 
         # Use the first attention metadata builder
@@ -2970,19 +2965,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             common_metadata = CommonAttentionMetadata(
                 query_start_loc=encoder_metadata["encoder_seq_start_loc"],
                 seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
-                num_reqs=len(encoder_metadata["encoder_seq_lens"]),
+                num_reqs=len(encoder_seq_lens),
                 num_actual_tokens=encoder_metadata["num_encoder_tokens"],
                 max_query_len=encoder_metadata["max_encoder_seq_len"],
             )
         else:
             # ENCODER_DECODER cross-attention
+            seq_lens_tensor = torch.full(
+                (common_attn_metadata.num_reqs, ),
+                self.max_encoder_len,
+                dtype=torch.int32,
+                device=self.device,
+            )
             common_metadata = CommonAttentionMetadata(
                 query_start_loc=common_attn_metadata.query_start_loc,
-                seq_lens=encoder_metadata["encoder_seq_lens_tensor"],
+                seq_lens=seq_lens_tensor,
                 num_reqs=common_attn_metadata.num_reqs,
                 num_actual_tokens=common_attn_metadata.num_actual_tokens,
                 max_query_len=common_attn_metadata.max_query_len,
             )
+            cross_slot_mapping_tensor = async_tensor_h2d(
+                cross_slot_mapping, torch.int64, self.device, self.pin_memory)
+            encoder_metadata["cross_slot_mapping"] = cross_slot_mapping_tensor
+
         # Build encoder attention metadata using the builder
         return builder.build(
             common_prefix_len=0,  # No cascade for encoder

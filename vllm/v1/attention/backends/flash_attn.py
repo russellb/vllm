@@ -132,8 +132,6 @@ class FlashAttentionMetadata:
 
     # Begin encoder attn & enc/dec cross-attn fields...
 
-    # Encoder sequence lengths representation
-    encoder_seq_lens_tensor: Optional[torch.Tensor] = None
     # (batch_size + 1,). The cumulative sequence lengths of the encoder
     # sequences in the batch, used to index into sequence. E.g., if the sequence
     # length is [4, 6], it is [0, 4, 10].
@@ -161,8 +159,7 @@ class FlashAttentionMetadata:
         """
         All attention metadata required for encoder attention is set.
         """
-        res = (self.encoder_seq_lens_tensor is not None
-               and self.encoder_seq_start_loc is not None
+        res = (self.encoder_seq_start_loc is not None
                and self.max_encoder_seq_len is not None
                and self.num_encoder_tokens is not None)
         if not res:
@@ -170,12 +167,10 @@ class FlashAttentionMetadata:
             logger.info(
                 "[FLASH_ATTN DEBUG] "
                 "Encoder attention metadata is not fully set. "
-                "encoder_seq_lens_tensor: %s, "
                 "encoder_seq_start_loc: %s, "
                 "max_encoder_seq_len: %s, "
-                "num_encoder_tokens: %s", self.encoder_seq_lens_tensor,
-                self.encoder_seq_start_loc, self.max_encoder_seq_len,
-                self.num_encoder_tokens)
+                "num_encoder_tokens: %s", self.encoder_seq_start_loc,
+                self.max_encoder_seq_len, self.num_encoder_tokens)
         return res
 
 
@@ -248,7 +243,6 @@ class FlashAttentionMetadataBuilder(
             common_prefix_len: int,
             common_attn_metadata: CommonAttentionMetadata,
             # Encoder/cross-attention metadata (optional)
-            encoder_seq_lens_tensor: Optional[torch.Tensor] = None,
             encoder_seq_start_loc: Optional[torch.Tensor] = None,
             max_encoder_seq_len: Optional[int] = None,
             num_encoder_tokens: Optional[int] = None,
@@ -422,7 +416,6 @@ class FlashAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             # Encoder/cross-attention fields
-            encoder_seq_lens_tensor=encoder_seq_lens_tensor,
             encoder_seq_start_loc=encoder_seq_start_loc,
             max_encoder_seq_len=max_encoder_seq_len,
             num_encoder_tokens=num_encoder_tokens,

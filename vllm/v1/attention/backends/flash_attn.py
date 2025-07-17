@@ -553,8 +553,7 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
-        if (self.kv_sharing_target_layer_name is None
-                and attn_type != AttentionType.ENCODER and (key is not None)
+        if (self.kv_sharing_target_layer_name is None and (key is not None)
                 and (value is not None)):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.

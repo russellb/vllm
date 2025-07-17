@@ -499,8 +499,10 @@ class WhisperEncoder(nn.Module):
             embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
             hidden_states.append(embeds)
         hidden_states = torch.cat(hidden_states)
+
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
+
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 

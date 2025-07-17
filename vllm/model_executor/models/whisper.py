@@ -499,21 +499,8 @@ class WhisperEncoder(nn.Module):
             embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
             hidden_states.append(embeds)
         hidden_states = torch.cat(hidden_states)
-
-        import os
-        os.environ["FLASH_ATTN_DEBUG"] = "1"
-        debugging = True
         for encoder_layer in self.layers:
-            if debugging:
-                logger.info("[WHISPER DEBUG] First encoder layer input: %s",
-                            hidden_states)
             hidden_states = encoder_layer(hidden_states)
-            if debugging:
-                logger.info("[WHISPER DEBUG] First encoder layer output: %s",
-                            hidden_states)
-                debugging = False
-                os.environ["FLASH_ATTN_DEBUG"] = "0"
-
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 

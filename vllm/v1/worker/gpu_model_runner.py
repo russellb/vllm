@@ -1183,21 +1183,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return metadata
 
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _batch_mm_kwargs_from_scheduler(
+        self,
+        scheduler_output: "SchedulerOutput",
+        include_positions: bool = False,
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, int,
+                                                      PlaceholderRange]]]:
+        """Batch multimodal kwargs from scheduled encoder inputs.
+
+        Args:
+            scheduler_output: The scheduler output containing scheduled encoder
+              inputs.
+
+            include_positions: Whether to also return position information for
+              each item.
+
+        Returns:
+            A tuple of (mm_kwargs, req_ids_pos) where:
+            - mm_kwargs: List of multimodal kwargs items to be batched
+            - req_ids_pos: List of (req_id, input_id, position_info) tuples if
+              include_positions=True, else None """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
-            return
+            return [], []
 
-        # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
-        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        req_ids_pos: list[tuple[str, int, PlaceholderRange]] = []
+
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                req_ids_pos.append(
-                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+                if mm_input_id < len(req_state.mm_kwargs):
+                    mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                    if include_positions:
+                        req_ids_pos.append(
+                            (req_id, mm_input_id,
+                             req_state.mm_positions[mm_input_id]))
+
+        return mm_kwargs, req_ids_pos
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+        # Batch the multi-modal inputs using the helper method.
+        mm_kwargs, req_ids_pos = self._batch_mm_kwargs_from_scheduler(
+            scheduler_output, include_positions=True)
+
+        if not mm_kwargs:
+            return
 
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
@@ -1295,72 +1327,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> dict[str, torch.Tensor]:
-        """Extract encoder inputs for encoder-decoder models like Whisper.
+        """Extract encoder inputs for encoder-decoder models.
 
-        This method extracts audio input features and creates encoder positions
-        from scheduled encoder inputs. These are only needed when the encoder
-        needs to process new MM inputs (typically on the first processing step).
+        This method extracts multimodal input features from scheduled encoder
+        inputs and formats them for the encoder-decoder model forward pass.
         """
-        input_features_list = []
-        total_encoder_tokens = 0
+        # Batch the multi-modal inputs using the helper method.
+        mm_kwargs, _ = self._batch_mm_kwargs_from_scheduler(
+            scheduler_output, include_positions=False)
 
-        for req_id, encoder_input_ids in (
-                scheduler_output.scheduled_encoder_inputs.items()):
-            req_state = self.requests[req_id]
-
-            for mm_input_id in encoder_input_ids:
-                # TODO (NickLucche) this is very whisper specific atm, refactor
-                if mm_input_id < len(req_state.mm_inputs):
-                    mm_input = req_state.mm_inputs[mm_input_id]
-                    # Extract input_features from MM input kwargs
-                    if "input_features" in mm_input:
-                        features = mm_input["input_features"]
-                        input_features_list.append(features)
-                        # Calculate encoder sequence length for this input
-                        num_features = len(features) if isinstance(
-                            features, list) else 1
-                        total_encoder_tokens += num_features * \
-                            self.max_encoder_len
-
-        if not input_features_list:
+        if not mm_kwargs:
             return {}
 
-        # Process and concatenate input features
-        input_features = self._process_input_features(input_features_list)
+        # Group MM kwargs by modality and extract features
+        encoder_features = {}
+        for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
+                mm_kwargs,
+                device=self.device,
+                pin_memory=self.pin_memory,
+        ):
+            # Add the grouped features to encoder_features dict
+            # This allows the model to receive them as kwargs (e.g.,
+            # input_features=...)
+            encoder_features.update(mm_kwargs_group)
 
-        # Move input_features to the correct device and dtype
-        input_features = input_features.to(device=self.device,
-                                           dtype=self.model_config.dtype)
-
-        return {
-            "input_features": input_features,
-        }
-
-    def _process_input_features(self,
-                                input_features_list: list) -> torch.Tensor:
-        """Process and concatenate input features into a single tensor."""
-        if len(input_features_list) == 1 and isinstance(
-                input_features_list[0], torch.Tensor):
-            input_features = input_features_list[0]
-            # Ensure we have the correct 4D shape
-            #   [batch, channels, mel_bins, time]
-            if input_features.dim() == 3:
-                # Add batch dim: [ch, mel, time] -> [1, ch, mel, time]
-                input_features = input_features.unsqueeze(0)
-        else:
-            # Handle list of tensors
-            processed_features = []
-            for feat in input_features_list:
-                if isinstance(feat, torch.Tensor):
-                    # Ensure 4D shape
-                    if feat.dim() == 3:
-                        feat = feat.unsqueeze(0)
-                    processed_features.append(feat)
-                else:
-                    processed_features.append(torch.stack(feat))
-            input_features = torch.cat(processed_features)
-
-        return input_features
+        return encoder_features
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.

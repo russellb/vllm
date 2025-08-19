@@ -559,14 +559,14 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     def save_new_computed_blocks(
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
-        # We do not allocate blocks as decoder tokens are generated, so this
-        # method is not relevant.
-        pass
+        # We do not cache blocks for cross-attention to be shared between
+        # requests, so  `new_computed_blocks` should always be empty.
+        assert len(new_computed_blocks) == 0
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
-        pass
+        raise ValueError("Should not be called as prefix caching is disabled.")
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:

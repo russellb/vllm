@@ -3593,6 +3593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 query_start_loc_cpu=common_attn_metadata.query_start_loc_cpu,
                 seq_lens=seq_lens_tensor,
                 seq_lens_cpu=seq_lens_cpu,
+                max_seq_len=self.max_encoder_len,
                 num_computed_tokens_cpu=common_attn_metadata.
                 num_computed_tokens_cpu,
                 num_reqs=common_attn_metadata.num_reqs,
@@ -3619,6 +3620,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 query_start_loc_cpu=encoder_seq_start_loc_tensor.cpu(),
                 seq_lens=encoder_seq_lens_tensor,
                 seq_lens_cpu=encoder_seq_lens_tensor.cpu(),
+                max_seq_len=self.max_encoder_len,
                 num_computed_tokens_cpu=dummy_computed_tokens,
                 num_reqs=len(encoder_seq_lens),
                 num_actual_tokens=num_encoder_tokens,

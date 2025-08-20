@@ -11,6 +11,7 @@ from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -285,14 +286,24 @@ def bind_kv_cache(
         index2name[extract_layer_index(layer_name)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
-        # Some models (like encoder-decoder models) may have multiple
-        # layers with the same index, so we need to append all of them.
-        # For an encoder-decoder model, each decoder layer has
-        # self-attention (AttentionType.DECODER)
-        # and cross-attention (AttentionType.ENCODER_DECODER).
         layer_names = index2name[layer_index]
-        for layer_name in layer_names:
-            runner_kv_caches.append(kv_caches[layer_name])
+        if len(layer_names) > 1:
+            # One typical case is encoder-decoder model, e.g., bart.
+            # The cross attention and self attention in the same decoder layer
+            # has different layer_name but the same layer_index.
+
+            # TODO - analyze where runner_kv_caches is used and the right
+            # way to ensure it properly reflects multiple attention layers
+            # in the same decoder block.
+            if current_platform.is_cuda():
+                # We know that the GPU runner is not impacted by this
+                # case. Some test code depends on runner_kv_caches, but
+                # not in a way that's impacted by ignoring this.
+                pass
+            else:
+                raise NotImplementedError
+        layer_name = layer_names[0]
+        runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

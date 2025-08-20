@@ -210,10 +210,6 @@ class CrossAttentionSpec(AttentionSpec):
     KV cache spec for cross-attention layers in encoder-decoder models.
     """
 
-    @property
-    def type_id(self) -> str:
-        return f"cross_attention_{self.block_size}_{self.page_size_bytes}"
-
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # For cross-attention, we need to cache encoder states
         # Get encoder length (e.g., 1500 for Whisper).

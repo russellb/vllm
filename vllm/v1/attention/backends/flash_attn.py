@@ -483,6 +483,9 @@ class FlashAttentionImpl(AttentionImpl):
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
 
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
         if (self.kv_sharing_target_layer_name is None and (key is not None)
                 and (value is not None)):
             # Reshape the input keys and values and store them in the cache.
@@ -492,14 +495,12 @@ class FlashAttentionImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            updated_slot_mapping = attn_metadata.slot_mapping
-
             reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
                 value_cache,
-                updated_slot_mapping,
+                attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,

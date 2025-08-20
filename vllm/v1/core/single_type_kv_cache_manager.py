@@ -593,7 +593,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # 2. Encoder states are computed once per request, not incrementally
         # 3. No reusable prefix exists between different multimodal inputs
         # Return empty blocks to indicate no cache hits
-        return tuple([] for _ in range(len(kv_cache_group_ids)))
+        raise NotImplementedError(
+            "CrossAttentionManager does not support caching")
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:

@@ -451,10 +451,14 @@ class Scheduler(SchedulerInterface):
 
                 # Determine if we need to allocate cross-attention blocks.
                 if self.is_encoder_decoder and request.has_encoder_inputs:
-                    # NOTE(russellb): For Whisper, we know that the input is
+                    # TODO(russellb): For Whisper, we know that the input is
                     # always padded to the maximum length. If we support other
                     # encoder-decoder models, this will need to be updated if we
                     # want to only allocate what is needed.
+                    assert ("whisper"
+                            in self.vllm_config.model_config.model.lower()), (
+                                "Whisper is the only supported "
+                                "encoder-decoder model.")
                     num_encoder_tokens = MULTIMODAL_REGISTRY.\
                         get_encdec_max_encoder_len(
                         self.vllm_config.model_config)

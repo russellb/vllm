@@ -15,6 +15,9 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.cross_attention import CrossAttention
+from vllm.attention.layers.encoder_attention import EncoderAttention
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -180,16 +183,51 @@ class WhisperAttention(nn.Module):
                 num_kv_heads=self.num_kv_heads,
             )
         else:
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                attn_type=self.attn_type,
-            )
+            # Use specialized attention classes based on attention type
+            if self.attn_type == AttentionType.ENCODER_ONLY:
+                self.attn = EncoderOnlyAttention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                )
+            elif self.attn_type == AttentionType.ENCODER:
+                self.attn = EncoderAttention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                )
+            elif self.attn_type == AttentionType.ENCODER_DECODER:
+                self.attn = CrossAttention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                )
+            else:  # AttentionType.DECODER (regular decoder self-attention)
+                self.attn = Attention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.attn",
+                    attn_type=self.attn_type,
+                )
 
     def _init_qkv(
         self,

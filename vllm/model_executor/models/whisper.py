@@ -603,6 +603,8 @@ class WhisperModel(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         encoder_outputs = self.get_encoder_outputs(input_features)
+        if encoder_outputs is not None:
+            print("Encoder outputs: %s", encoder_outputs)
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,

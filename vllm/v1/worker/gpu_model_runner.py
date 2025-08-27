@@ -65,6 +65,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec,
+                                        EncoderAttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
@@ -855,26 +856,83 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
 
+        def _dummy_blk_table_and_slot_mapping():
+            blk_table_tensor = torch.zeros(
+                (num_reqs, 1),
+                dtype=torch.int32,
+                pin_memory=self.pin_memory,
+                device="cpu").to(self.device, non_blocking=True)
+            slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
+                                       dtype=torch.int32,
+                                       pin_memory=self.pin_memory,
+                                       device="cpu").to(self.device,
+                                                        non_blocking=True)
+            return blk_table_tensor, slot_mapping
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            query_start_loc_arg = query_start_loc
+            query_start_loc_cpu_arg = query_start_loc_cpu
+            seq_lens_arg = seq_lens
+            seq_lens_cpu_arg = seq_lens_cpu
+            num_computed_tokens_cpu_arg = num_computed_tokens_cpu
+            num_reqs_arg = num_reqs
+            total_num_scheduled_tokens_arg = total_num_scheduled_tokens
+            max_num_scheduled_tokens_arg = max_num_scheduled_tokens
+            max_seq_len_arg = max_seq_len
+            causal_arg = True
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
-                blk_table_tensor = torch.zeros(
-                    (num_reqs, 1),
-                    dtype=torch.int32,
-                    pin_memory=self.pin_memory,
-                    device="cpu").to(self.device, non_blocking=True)
-                slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
-                                           dtype=torch.int32,
-                                           pin_memory=self.pin_memory,
-                                           device="cpu").to(self.device,
-                                                            non_blocking=True)
+                blk_table_tensor, slot_mapping = (
+                    _dummy_blk_table_and_slot_mapping())
                 num_common_prefix_blocks = 0
+                causal_arg = False
+            elif isinstance(kv_cache_group_spec.kv_cache_spec,
+                             EncoderAttentionSpec):
+                # Encoder layers do not have KV cache, so we need to
+                # create a dummy block table and slot mapping for them.
+                blk_table_tensor, slot_mapping = (
+                    _dummy_blk_table_and_slot_mapping())
+                num_common_prefix_blocks = 0
+                causal_arg = False
+
+                scheduled_encoder_inputs =\
+                    scheduler_output.scheduled_encoder_inputs
+                encoder_seq_lens = []
+                num_encoder_tokens = 0
+
+                for _ in scheduled_encoder_inputs:
+                    # NOTE using the max encoder len is whisper specific
+                    encoder_seq_len = self.max_encoder_len
+                    encoder_seq_lens.append(encoder_seq_len)
+                    num_encoder_tokens += encoder_seq_len
+
+                # Create encoder sequence start locations
+                encoder_seq_start_loc = [0]
+                for seq_len in encoder_seq_lens:
+                    encoder_seq_start_loc.append(encoder_seq_start_loc[-1] +
+                                                 seq_len)
+
+                seq_lens_arg = torch.tensor(encoder_seq_lens,
+                                               dtype=torch.int32,
+                                               device=self.device)
+                seq_lens_cpu_arg = seq_lens_arg.cpu()
+                query_start_loc_arg = torch.tensor(encoder_seq_start_loc,
+                                                    dtype=torch.int32,
+                                                    device=self.device)
+                query_start_loc_cpu_arg = query_start_loc_arg.cpu()
+                num_reqs_arg = len(encoder_seq_lens)
+                num_computed_tokens_cpu_arg = torch.zeros(
+                    (num_reqs_arg, ), dtype=torch.int32, device="cpu")
+                # NOTE - using max_encoder_len is whisper specific
+                total_num_scheduled_tokens_arg = self.max_encoder_len
+                max_num_scheduled_tokens_arg = self.max_encoder_len
+                max_seq_len_arg = self.max_encoder_len
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
@@ -889,29 +947,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_common_prefix_blocks[kv_cache_group_id])
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                max_seq_len=max_seq_len,
+                query_start_loc=query_start_loc_arg,
+                query_start_loc_cpu=query_start_loc_cpu_arg,
+                seq_lens=seq_lens_arg,
+                seq_lens_cpu=seq_lens_cpu_arg,
+                num_computed_tokens_cpu=num_computed_tokens_cpu_arg,
+                num_reqs=num_reqs_arg,
+                num_actual_tokens=total_num_scheduled_tokens_arg,
+                max_query_len=max_num_scheduled_tokens_arg,
+                max_seq_len=max_seq_len_arg,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
-                causal=True,
+                causal=causal_arg,
             )
-
-            # This is for determining whether the current attention layer is
-            # encoder-decoder attention, NOT whether this is an encoder-decoder
-            # model. In a future change, renaming ENCODER_DECODER attention to
-            # CROSS_ATTN would help avoid confusing the two.
-            is_enc_dec = isinstance(kv_cache_group_spec.kv_cache_spec,
-                                    CrossAttentionSpec)
-            if is_enc_dec:
-                encoder_attn_metadata = self._build_cross_attn_metadata(
-                    scheduler_output, common_attn_metadata)
 
             if self.speculative_config and \
                 spec_decode_common_attn_metadata is None:
@@ -929,11 +977,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-                attn_metadata_i = (
-                    encoder_attn_metadata if is_enc_dec else builder.build(
+                attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                    ))
+                    )
 
                 fast_prefill_metadata = attn_metadata_i
                 if (self.cache_config.kv_sharing_fast_prefill
@@ -3277,8 +3324,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                       list[str]] = defaultdict(list)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
-            if attn_module.attn_type in (AttentionType.ENCODER,
-                                         AttentionType.ENCODER_ONLY):
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
                 attn_spec = EncoderOnlyAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
@@ -3287,6 +3333,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     use_mla=use_mla)
                 encoder_only_attn_specs[attn_spec].append(layer_name)
                 self.runner_only_attn_layers.add(layer_name)
+            elif attn_module.attn_type == AttentionType.ENCODER:
+                attn_spec = EncoderAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    use_mla=use_mla)
         if len(encoder_only_attn_specs) > 0:
             assert len(
                 encoder_only_attn_specs
@@ -3386,79 +3439,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return kv_cache_spec
 
-
-    def _build_cross_attn_metadata(
-        self,
-        scheduler_output: "SchedulerOutput",
-        decoder_common_metadata: CommonAttentionMetadata,
-    ) -> Any:
-        """Build cross-attention metadata for ENCODER_DECODER attention type.
-        
-        This handles cross-attention between decoder queries and encoder
-        keys/values.
-        
-        Args:
-            scheduler_output: Scheduler output  
-            decoder_common_metadata: Common metadata from decoder for query
-                                     info
-            
-        Returns:
-            Cross-attention metadata
-        """
-        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-
-        # Calculate cross-attention slot mappings
-        cross_slot_mapping = []
-        for req_id in scheduled_encoder_inputs:
-            encoder_seq_len = self.max_encoder_len
-            cross_slot_mapping.extend(
-                self._get_cross_slot_mapping(req_id, encoder_seq_len))
-
-        # Create cross-attention metadata using decoder queries and encoder
-        # keys/values
-        cross_slot_tensor = torch.tensor(cross_slot_mapping,
-                                         dtype=torch.int64,
-                                         device=self.device)
-
-        # Build common metadata for cross-attention
-        # Use decoder metadata as base but with encoder sequence lengths for
-        # keys/values
-        encoder_seq_lens_tensor = torch.full(
-            (decoder_common_metadata.num_reqs, ),
-            self.max_encoder_len,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        encoder_seq_lens_cpu = torch.full(
-            (decoder_common_metadata.num_reqs, ),
-            self.max_encoder_len,
-            dtype=torch.int32,
-            device="cpu",
-        )
-
-        cross_common_metadata = CommonAttentionMetadata(
-            query_start_loc=decoder_common_metadata.query_start_loc,
-            query_start_loc_cpu=decoder_common_metadata.query_start_loc_cpu,
-            seq_lens=
-            encoder_seq_lens_tensor,  # Encoder sequence lengths for keys/values
-            seq_lens_cpu=encoder_seq_lens_cpu,
-            max_seq_len=self.max_encoder_len,
-            num_computed_tokens_cpu=decoder_common_metadata.
-            num_computed_tokens_cpu,
-            num_reqs=decoder_common_metadata.num_reqs,
-            num_actual_tokens=decoder_common_metadata.num_actual_tokens,
-            max_query_len=decoder_common_metadata.max_query_len,
-            block_table_tensor=decoder_common_metadata.block_table_tensor,
-            slot_mapping=cross_slot_tensor,  # Cross-attention slot mapping
-            causal=False,  # Cross-attention is not causal
-        )
-
-        # Build cross-attention metadata
-        builder = self.attn_groups[0][0].metadata_builder
-        return builder.build(
-            common_prefix_len=0,  # No cascade for cross-attention
-            common_attn_metadata=cross_common_metadata,
-        )
 
     def _get_cross_slot_mapping(self, req_id: str,
                                 encoder_seq_len: int) -> list[int]:

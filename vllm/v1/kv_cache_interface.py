@@ -212,6 +212,11 @@ class EncoderOnlyAttentionSpec(AttentionSpec):
         return 0
 
 
+# Alias for encoder-only attention
+# They can be treated as equivalent for our purposes here.
+EncoderAttentionSpec = EncoderOnlyAttentionSpec
+
+
 @dataclass(frozen=True)
 class CrossAttentionSpec(AttentionSpec):
     """

@@ -109,6 +109,22 @@ else:
 logger = init_logger(__name__)
 
 
+class FakeSchedulerOutput:
+    """Fake scheduler output
+
+    Used in part of the code preparing fake whisper inputs during
+    _dummy_run().
+    """
+
+    def __init__(self, num_reqs):
+        # Create fake encoder input
+        # - single audio input with 1500 tokens per request
+        self.scheduled_encoder_inputs = {}
+        for i in range(num_reqs):
+            req_id = f"fake_req_{i}"
+            self.scheduled_encoder_inputs[req_id] = [0]
+
+
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def __init__(
@@ -1262,7 +1278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _batch_mm_kwargs_from_scheduler(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: "SchedulerOutput | FakeSchedulerOutput",
     ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
         """Batch multimodal kwargs from scheduled encoder inputs.
 
@@ -1396,7 +1412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _extract_encoder_inputs(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: "SchedulerOutput | FakeSchedulerOutput",
     ) -> dict[str, torch.Tensor]:
         """Extract encoder inputs for encoder-decoder models.
 
@@ -2418,6 +2434,64 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         pin_memory=self.pin_memory,
                     ))
 
+    def _create_fake_whisper_inputs(self,
+                                    num_reqs: int) -> dict[str, torch.Tensor]:
+        """Create fake encoder inputs for whisper during dummy runs
+        
+        This creates a fake scheduler_output with audio encoder inputs
+        containing 1500 encoder tokens as specified by the user.
+        
+        Args:
+            num_reqs: Number of requests in the batch
+            
+        Returns:
+            Dict containing encoder input features for the model
+        """
+        if (not self.model_config.is_encoder_decoder
+                or not self.supports_mm_inputs):
+            return {}
+
+    # Create fake requests with multimodal data
+        original_requests = self.requests.copy()
+        try:
+            # Temporarily add fake requests
+            for i in range(num_reqs):
+                req_id = f"fake_req_{i}"
+                # Get dummy multimodal data for audio with 1500 tokens
+                dummy_mm_data = self.mm_registry.get_decoder_dummy_data(
+                    model_config=self.model_config,
+                    seq_len=1500,  # 1500 encoder tokens as requested
+                    mm_counts={"audio": 1},
+                    cache=self.mm_budget.cache if self.mm_budget else None,
+                )
+
+                # Create fake request state with the dummy multimodal data
+                fake_request = type(
+                    'FakeRequest', (), {
+                        'mm_kwargs':
+                        [dummy_mm_data.multi_modal_data["audio"][0]],
+                        'mm_hashes': [f"fake_hash_{i}"],
+                        'mm_positions': [
+                            type('FakePosition', (), {
+                                'offset': 0,
+                                'length': 1500,
+                                'is_embed': None
+                            })()
+                        ]
+                    })()
+                self.requests[req_id] = fake_request
+
+            # Call _extract_encoder_inputs with the fake scheduler output
+            fake_scheduler_output = FakeSchedulerOutput(num_reqs)
+            encoder_inputs = self._extract_encoder_inputs(
+                fake_scheduler_output)
+
+            return encoder_inputs
+
+        finally:
+            # Restore original requests
+            self.requests = original_requests
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -2535,8 +2609,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens, remove_lora):
             model_kwargs = self._init_model_kwargs(num_tokens)
-            if (self.supports_mm_inputs
-                    and not self.model_config.is_encoder_decoder):
+            if self.model_config.is_encoder_decoder:
+                input_ids = self.input_ids.gpu[:num_tokens]
+                inputs_embeds = None
+                if self.supports_mm_inputs:
+                    # Create fake audio input for Whisper
+                    fake_encoder_inputs = self._create_fake_whisper_inputs(
+                        num_reqs)
+                    model_kwargs.update(fake_encoder_inputs)
+            elif self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
                 model_kwargs = {

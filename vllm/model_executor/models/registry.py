@@ -364,6 +364,12 @@ _MULTIMODAL_MODELS = {
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
+    # We treat Bart as multimodal, as its execution is almost identical to how
+    # we execute whisper, though the encoder inputs are a different modality
+    # (text vs audio).
+    "BartModel": ("bart", "BartForConditionalGeneration"),
+    "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "MBartForConditionalGeneration": ("bart", "MBartForConditionalGeneration"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),  # noqa: E501
 }
 
@@ -442,11 +448,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi4FlashForCausalLM": "0.10.2",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
-    "BartModel": "0.10.2",
-    "BartForConditionalGeneration": "0.10.2",
     "DonutForConditionalGeneration": "0.10.2",
     "Florence2ForConditionalGeneration": "0.10.2",
-    "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
 }
 

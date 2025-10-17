@@ -2582,8 +2582,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # from transformers import AutoTokenizer
             # tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
             # print("TOKENIZER INPUT IDS:", tokenizer.decode(input_ids), "\n")
-            print("INPUT EMBEDS:", inputs_embeds.shape if inputs_embeds is not None else "DioCaneNone", "\n")
-            print("INPUT IDS:", input_ids.shape if input_ids is not None else "DioCaneNone", "\n")
+            print("INPUT EMBEDS:", inputs_embeds.shape if inputs_embeds is not None else "None", "\n")
+            print("INPUT IDS:", input_ids.shape if input_ids is not None else "None", "\n")
             # TODO inputs_embeds is NONE
             # SHOULD HAVE VALUE AFTER ENCODER RUNS!
             model_output = self._model_forward(

@@ -735,6 +735,9 @@ class BartDecoder(nn.Module):
 
         return hidden_states
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
 
 class BartModel(nn.Module, SupportsQuant):
     _tied_weights_keys = [
@@ -772,7 +775,8 @@ class BartModel(nn.Module, SupportsQuant):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         encoder_input_ids: torch.Tensor,
-        encoder_positions: torch.Tensor,
+        # encoder_positions: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         r"""
         Args:
@@ -790,14 +794,15 @@ class BartModel(nn.Module, SupportsQuant):
             Model output torch.Tensor
         """
 
-        encoder_hidden_states = None
+        # encoder_hidden_states = None
 
-        if encoder_input_ids.numel() > 0:
-            # Run encoder attention if a non-zero number of encoder tokens
-            # are provided as input
-            encoder_hidden_states = self.encoder(
-                input_ids=encoder_input_ids, positions=encoder_positions
-            )
+        # if encoder_input_ids.numel() > 0:
+        #     # Run encoder attention if a non-zero number of encoder tokens
+        #     # are provided as input
+        #     # TODO this should be cached from encoder run! We should get it here
+        #     encoder_hidden_states = self.encoder(
+        #         input_ids=encoder_input_ids, positions=encoder_positions
+        #     )
 
         # decoder outputs consists of
         # (dec_features, past_key_value, dec_hidden, dec_attn)
@@ -887,6 +892,7 @@ class BartDummyInputsBuilder(BaseDummyInputsBuilder[BartProcessingInfo]):
         # Create dummy encoder text of appropriate length
         # Use simple repeated words for profiling
         dummy_text = " ".join(["word"] * seq_len)
+        # dummy_text = [0 for _ in range(seq_len)]
         return {"text": dummy_text}
 
 
@@ -898,10 +904,14 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
-        # For BART, we create a dummy encoder prompt with a single placeholder token
-        # This will be replaced by the actual encoder tokens via prompt updates
-        # Similar to Whisper's approach
-        return [0]
+        # This is called from input preprocessor with encoder-decoder prompts 
+        # already split out 
+        tokenizer = self.info.get_tokenizer()
+        return tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )
 
     def create_decoder_prompt(
         self,
@@ -925,16 +935,20 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
         from transformers.feature_extraction_utils import BatchFeature
 
         tokenizer = self.info.get_tokenizer()
+        # breakpoint()
 
         # For BART encoder-decoder: check if we have encoder text data
         has_encoder_data = mm_data and "texts" in mm_data
+        # assert has_encoder_data
         logger.info("mm_data: %s", mm_data)
+        print("PROMPT:", prompt, "\n")
 
         result = {}
 
         if has_encoder_data:
             # Tokenize the encoder text from mm_data
             encoder_texts = mm_data["texts"]
+            print("ENCODED TEXT:", encoder_texts, "\n")
             encoder_text = encoder_texts[0] if encoder_texts else ""
             encoder_tokenized = tokenizer(
                 encoder_text,
@@ -946,6 +960,7 @@ class BartMultiModalProcessor(EncDecMultiModalProcessor[BartProcessingInfo]):
 
         # Always tokenize the prompt (for decoder or as dummy)
         # This will be popped by the base class
+        # TODO double tokenize?
         prompt_tokenized = tokenizer(
             prompt if prompt else "",
             add_special_tokens=False,
@@ -1050,6 +1065,7 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         # For BART, we parse the encoder_input_ids and return encoder outputs
         encoder_input = self._parse_and_validate_encoder_input(**kwargs)
         encoder_input_ids = encoder_input["encoder_input_ids"]
+        print("ENCDED INPUT IDOS get_mm_embeddings:", encoder_input_ids, "\n")
 
         # Squeeze all dimensions of size 1 to get 1D tensor
         # encoder_input_ids comes in as [1, 1, seq_len] and needs to be [seq_len]
@@ -1072,8 +1088,8 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
     def _parse_and_validate_encoder_input(
         self, **kwargs: object
     ) -> dict[str, torch.Tensor]:
+        # breakpoint()
         encoder_input_ids = kwargs.get("encoder_input_ids")
-
         if encoder_input_ids is not None:
             if not isinstance(encoder_input_ids, (torch.Tensor, list)):
                 raise ValueError(
@@ -1090,14 +1106,20 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        raise NotImplementedError()
+        # Ignore is_multimodal since we don't need to scatter encoder output 
+        # into input_ids, we just pass it through to compute cross-attention
+        return self.model.decoder.get_input_embeddings(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         r"""
@@ -1114,28 +1136,37 @@ class BartForConditionalGeneration(nn.Module, SupportsQuant, SupportsMultiModal)
         Returns:
             Output torch.Tensor
         """
+        # breakpoint()
         encoder_input = self._parse_and_validate_encoder_input(**kwargs)
+        # TODO use this to separate encoder and decoder embeddings
+        # TODO computing embeddings outside model is less meaningful here and can hurt performance a bit
         encoder_input_ids = encoder_input["encoder_input_ids"]
 
-        # Create encoder positions if we have encoder input
-        if encoder_input_ids is not None:
-            # Squeeze all dimensions of size 1 to get 1D tensor
-            encoder_input_ids = encoder_input_ids.squeeze()
-            encoder_positions = torch.arange(
-                encoder_input_ids.size(0),
-                dtype=torch.long,
-                device=encoder_input_ids.device,
-            )
-        else:
-            # Create empty tensors if no encoder input
-            encoder_positions = torch.tensor(
-                [], dtype=torch.long, device=input_ids.device
-            )
-            encoder_input_ids = torch.tensor(
-                [], dtype=torch.long, device=input_ids.device
-            )
+        # TODO either something like this or split the inputs_emb
+        decoder_input_ids = input_ids
+        # FIXME the thing is that this should be None after the first fwd pass to signal kv was cached..
+        encoder_hidden_states = inputs_embeds
 
-        return self.model(input_ids, positions, encoder_input_ids, encoder_positions)
+        # Create encoder positions if we have encoder input
+        # NOTE we must assume this is pre-computed from encoder run.
+        # if encoder_input_ids is not None:
+        #     # Squeeze all dimensions of size 1 to get 1D tensor
+        #     encoder_input_ids = encoder_input_ids.squeeze()
+        #     encoder_positions = torch.arange(
+        #         encoder_input_ids.size(0),
+        #         dtype=torch.long,
+        #         device=encoder_input_ids.device,
+        #     )
+        # else:
+        #     # Create empty tensors if no encoder input
+        #     encoder_positions = torch.tensor(
+        #         [], dtype=torch.long, device=input_ids.device
+        #     )
+        #     encoder_input_ids = torch.tensor(
+        #         [], dtype=torch.long, device=input_ids.device
+        #     )
+
+        return self.model(input_ids, positions, encoder_hidden_states)
 
     def compute_logits(
         self,

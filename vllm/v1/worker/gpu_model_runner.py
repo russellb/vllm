@@ -1698,6 +1698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             scheduler_output
         )
 
+        # breakpoint()
         if not mm_kwargs:
             return
 
@@ -1746,6 +1747,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
                 curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+                print("MM RUNNER EMBEDDINGS OUTPUT:", len(curr_group_outputs), curr_group_outputs[0].shape, "\n")
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -2157,14 +2159,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
+        # breakpoint()
         if (
             self.supports_mm_inputs
             and get_pp_group().is_first_rank
-            and not self.model_config.is_encoder_decoder
+            # and not self.model_config.is_encoder_decoder TODO this is important!
         ):
             # Run the multimodal encoder if any.
+            # FIXME decide how to pass encoder_output to language_model here!
             self._execute_mm_encoder(scheduler_output)
             mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+            breakpoint()
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -2176,6 +2181,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
+            # here we'll get the decoder embeddings
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
 
             input_ids = None
@@ -2573,6 +2579,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             record_function_or_nullcontext("Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            # from transformers import AutoTokenizer
+            # tokenizer = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
+            # print("TOKENIZER INPUT IDS:", tokenizer.decode(input_ids), "\n")
+            print("INPUT EMBEDS:", inputs_embeds.shape if inputs_embeds is not None else "DioCaneNone", "\n")
+            print("INPUT IDS:", input_ids.shape if input_ids is not None else "DioCaneNone", "\n")
+            # TODO inputs_embeds is NONE
+            # SHOULD HAVE VALUE AFTER ENCODER RUNS!
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3457,6 +3470,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Add encoder inputs for text-only encoder-decoder models
             if self.model_config.is_encoder_decoder and not self.supports_mm_inputs:
+                assert False
                 # TODO This is not the correct encoder input
                 model_kwargs.update(
                     {
@@ -3723,6 +3737,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # NOTE: Currently model is profiled with a single non-text
                     # modality with the max possible input tokens even when
                     # it supports multiple.
+                    # breakpoint()
                     dummy_modality = mm_budget.get_modality_with_max_tokens()
                     max_mm_items_per_batch = mm_budget.max_items_per_batch_by_modality[
                         dummy_modality

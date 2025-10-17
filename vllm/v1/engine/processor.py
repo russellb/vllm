@@ -477,11 +477,16 @@ class Processor:
             # input with modality "text". This allows us to reuse all of
             # the existing logic for scheduling encoder inputs.
             mm_features = mm_features or []
+            # breakpoint()
 
+            # FIXME I think this should be automatic
+            # TODO this needs to be encoder prompt in the first place!
+            # encoder_token_ids= decoder_inputs["prompt_token_ids"]
             encoder_tensor = torch.tensor(encoder_token_ids, dtype=torch.long)
             text_elem = MultiModalFieldElem(
                 modality="text",
-                key="input_ids",
+                # key="input_ids",
+                key="encoder_input_ids",
                 data=encoder_tensor,
                 field=MultiModalSharedField(1),
             )

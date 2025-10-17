@@ -418,6 +418,7 @@ class InputPreprocessor:
 
         * [`SingletonInputs`][vllm.inputs.data.SingletonInputs] instance
         """
+        breakpoint()
         parsed = parse_singleton_prompt(prompt)
 
         if parsed["type"] == "embeds":
@@ -592,7 +593,7 @@ class InputPreprocessor:
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: Optional[SingletonInputs]
-
+        breakpoint()
         if is_explicit_encoder_decoder_prompt(prompt):
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)

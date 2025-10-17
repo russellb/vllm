@@ -564,6 +564,7 @@ class MultiModalDataParser:
                 raise ValueError(f"Unsupported modality: {k}")
 
             # ignore empty embedding data
+            breakpoint()
             if (parsed_data := subparsers[k](v)) is not None:
                 mm_items[k] = parsed_data
 
